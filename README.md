@@ -8,10 +8,10 @@ Windows x64용 **오프라인 설치 패키지**입니다. 기본 경로는 `Pas
 
 [v0.4.0 배포 ZIP 및 SHA-256](https://github.com/emotionbug/kiro-cli-internal/releases/tag/v0.4.0)
 
-1. 배포 ZIP 전체를 **새 로컬 폴더**에 풉니다. GitHub의 `Source code.zip`은 실행 패키지가 아닙니다.
+1. 배포 ZIP 전체를 **새 로컬 폴더**(예: `C:\KiroOffline`)에 풉니다. GitHub의 `Source code.zip`은 실행 패키지가 아닙니다.
 2. `setup.cmd`를 실행하여 동봉 플러그인의 비샌드박스 실행을 검토·승인하고 개인 Paseo 비밀번호를 정합니다.
 3. `auth.cmd login`으로 Kiro 계정에 로그인합니다. 기본 device 흐름은 표시된 링크를 다른 승인된 브라우저/기기에서 열어도 됩니다.
-4. `start.cmd`를 실행합니다. 기존 승인된 최신 Edge/Chrome에서 `http://127.0.0.1:16767`을 엽니다. IE는 지원하지 않습니다.
+4. `start.cmd`를 실행합니다. 기존 승인된 최신 Edge/Chrome에서 `http://127.0.0.1:16767`을 엽니다. 첫 화면의 **Direct connection**에서 `127.0.0.1:16767` 서버를 등록하고 설정한 개인 비밀번호로 접속합니다. IE는 지원하지 않습니다.
 5. `Kiro HTTP (OMP)` 프로필을 선택합니다. 모델은 로그인한 계정의 메타데이터에서만 채워집니다.
 6. 종료할 때 `stop.cmd`를 실행합니다. 일반 Paseo의 6767 포트나 다른 사용자의 데몬은 중지하지 않습니다.
 
@@ -76,6 +76,8 @@ network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem
 ```
 
 네트워크를 변경하기 전에 `stop.cmd`로 이 데몬을 중지합니다. 주소는 대상 PC의 사용자 데이터에만 저장되며 ZIP에 미리 넣지 않습니다. 프록시 사용자명/비밀번호를 URL에 넣지 않습니다. upstream 프록시 인증은 현재 Windows 사용자의 SSPI Negotiate/NTLM을 사용합니다. localhost·127.0.0.1·::1은 우회하고 TLS 검증은 유지합니다. Node는 Windows 신뢰 저장소를 사용하며 공개 CA 인증서를 Bun용 PEM으로 내보냅니다. 시스템 프록시/인증서 설정은 변경하지 않습니다.
+
+**내부망은 차단하지 않습니다.** 시스템/PAC 모드는 목적지별 `DIRECT`/프록시 선택과 Windows 시스템 프록시의 내부 주소 예외를 사용합니다. 내부 API·Git·MCP를 Kiro 도메인으로 제한하지 않으며 승인된 사설 CA를 사용할 수 있습니다. 수동 고정 프록시 모드는 내부 주소도 그 프록시를 경유하므로 내부망 예외가 필요하면 시스템/PAC 모드를 사용하세요. 격리된 홈 때문에 Git/SSH의 기존 설정·인증이 자동으로 복사되지는 않습니다. CI의 외부망 차단용 브라우저 플래그는 배포 실행기에 포함하지 않습니다. 실제 회사 내부주소·PAC·SSPI 정책은 현장 검증이 필요합니다.
 
 지원 범위는 HTTP upstream 프록시, HTTP/CONNECT, Windows 시스템 설정 및 HTTP(S)/로컬 파일 PAC입니다. PAC 오류를 임의 DIRECT로 숨기지 않습니다. SOCKS·HTTPS-to-proxy 및 PAC의 두 번째 프록시로 자동 failover는 제공하지 않습니다. PAC 파일 서버 자체에 대한 인증 위임은 하지 않으므로 그 서버가 인증을 요구하면 승인된 로컬 PAC 파일을 사용하세요.
 

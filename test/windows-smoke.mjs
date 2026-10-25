@@ -1547,6 +1547,28 @@ async function smoke() {
     const browserPortServer = net.createServer();
     const browserPort = await listen(browserPortServer);
     await new Promise((resolve) => browserPortServer.close(resolve));
+    // Browser-vendor background traffic is not application-provider traffic.
+    // Deny it on a separate loopback sink; keep the application proxy strict.
+    report.browserNetwork = {
+      scope: "Browser-only denial proxy; foreground page HTTP and WebSocket requests are checked separately by CDP",
+      rejectedHttpRequests: 0,
+      rejectedConnectRequests: 0,
+      upstreamSockets: 0,
+    };
+    const browserProxy = http.createServer((_request, response) => {
+      report.browserNetwork.rejectedHttpRequests++;
+      response.writeHead(403).end();
+    });
+    browserProxy.on("connect", (_request, socket) => {
+      report.browserNetwork.rejectedConnectRequests++;
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    });
+    browserProxy.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    servers.push(browserProxy);
+    const browserProxyPort = await listen(browserProxy);
     browser = launch(
       browserExe,
       [
@@ -1563,7 +1585,7 @@ async function smoke() {
         "--metrics-recording-only",
         "--password-store=basic",
         "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
-        `--proxy-server=http://127.0.0.1:${proxyPort}`,
+        `--proxy-server=http://127.0.0.1:${browserProxyPort}`,
         "--proxy-bypass-list=127.0.0.1;localhost",
         `--remote-debugging-port=${browserPort}`,
         "--remote-debugging-address=127.0.0.1",
@@ -1632,6 +1654,11 @@ async function smoke() {
       const kinds = report.webUiDiagnostics.networkFailureKinds ??= [];
       if (!kinds.includes(kind)) kinds.push(kind);
     });
+    browserCdp.on("Network.webSocketCreated", (event) => {
+      const url = new URL(event.url);
+      if (url.protocol !== "ws:" || url.hostname !== "127.0.0.1" || url.port !== String(port))
+        uiViolations.push("non-loopback page WebSocket denied");
+    });
     browserCdp.on("Fetch.requestPaused", (event) => {
       const url = new URL(event.request.url);
       const allowed =
@@ -1664,7 +1691,7 @@ async function smoke() {
       async () => {
         const result = await browserCdp.send("Runtime.evaluate", {
           expression:
-            'JSON.stringify({title:document.title,text:document.body?.innerText||"",passwordInputs:document.querySelectorAll("input[type=password]").length,controls:document.querySelectorAll("input,button,[role=button]").length})',
+            `JSON.stringify({title:document.title,sameOrigin:location.origin===${JSON.stringify(uiOrigin)},passwordInputs:document.querySelectorAll("input[type=password]").length,controls:document.querySelectorAll("input,button,[role=button]").length})`,
           returnByValue: true,
         });
         try {
@@ -1672,11 +1699,14 @@ async function smoke() {
         } catch {
           return false;
         }
-        return /paseo/i.test(dom.title) && dom.text.length > 20 && dom.controls > 0;
+        return dom.sameOrigin && dom.controls > 0 &&
+          report.webUiDiagnostics.assetStatuses.Document.includes(200) &&
+          report.webUiDiagnostics.assetStatuses.Script.includes(200);
       },
       "Bundled web UI render",
       60000,
     );
+    assert.deepEqual(report.webUiDiagnostics.uncaughtExceptionTypes, [], "Bundled UI raised an uncaught exception");
     report.webUiDiagnostics.stage = "screenshot";
     await delay(1000);
     // Do not inject the password into the browser or publish arbitrary DOM text.
@@ -1687,7 +1717,7 @@ async function smoke() {
     });
     const png = Buffer.from(screenshot.data, "base64");
     assert.ok(
-      png.length > 5000 && png.subarray(1, 4).toString() === "PNG",
+      png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
       "Browser screenshot missing",
     );
     await writeFile(path.join(evidence, "web-ui.png"), png);
@@ -1751,7 +1781,8 @@ async function smoke() {
     // Also detect additions/deletions: manifest verification alone only hashes
     // listed files. Snapshot all names and hashes before setup and after shutdown.
     await assertPristine();
-    assert.equal(violations.length, 0);
+    report.applicationProxyViolations = { count: violations.length, categories: [...new Set(violations)] };
+    assert.equal(violations.length, 0, "Application stack attempted a non-Kiro upstream request");
     if (fixtureFailure) throw fixtureFailure;
     assert.equal(generations, expectedGenerations, "A qualification surface generated unsolicited output");
     assert.equal(searchRequests, 1, "A qualification surface repeated the completed Kiro search");
@@ -1766,7 +1797,7 @@ async function smoke() {
     report.phase = "complete";
   } catch (error) {
     await recordOwnedOmpLogFailures();
-    if (report.webUiDiagnostics) {
+    if (report.phase === "approved browser bundled web UI") {
       const messages = new Set([
         "Headless browser startup exceeded its deadline",
         "Bundled web UI render exceeded its deadline",
