@@ -88,6 +88,7 @@ async function smoke() {
   let daemon,
     browser,
     browserCdp,
+    uiOrigin,
     tui,
     fixtureFailure,
     pristine,
@@ -1518,6 +1519,13 @@ async function smoke() {
     };
 
     report.phase = "approved browser bundled web UI";
+    uiOrigin = `http://127.0.0.1:${port}`;
+    report.webUiDiagnostics = {
+      stage: "launch",
+      uncaughtExceptionTypes: [],
+      assetStatuses: { Document: [], Script: [], Stylesheet: [] },
+      failedRequests: 0,
+    };
     const candidates = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
       .filter(Boolean)
       .flatMap((base) => [
@@ -1566,6 +1574,7 @@ async function smoke() {
       { timeout: 0 },
     );
     let pageTarget;
+    report.webUiDiagnostics.stage = "browser startup";
     await waitFor(async () => {
       try {
         const targets = await (
@@ -1579,8 +1588,23 @@ async function smoke() {
         return false;
       }
     }, "Headless browser startup");
+    report.webUiDiagnostics.stage = "CDP connection";
     browserCdp = await cdp(pageTarget.webSocketDebuggerUrl);
     const uiViolations = [];
+    browserCdp.on("Runtime.exceptionThrown", (event) => {
+      const name = event.exceptionDetails?.exception?.className;
+      const safe = ["Error", "TypeError", "SyntaxError", "ReferenceError", "RangeError"].includes(name)
+        ? name : "other";
+      if (!report.webUiDiagnostics.uncaughtExceptionTypes.includes(safe))
+        report.webUiDiagnostics.uncaughtExceptionTypes.push(safe);
+    });
+    browserCdp.on("Network.responseReceived", (event) => {
+      const statuses = report.webUiDiagnostics.assetStatuses[event.type];
+      const status = event.response?.status;
+      if (statuses && Number.isInteger(status) && status >= 100 && status < 600 &&
+        !statuses.includes(status)) statuses.push(status);
+    });
+    browserCdp.on("Network.loadingFailed", () => report.webUiDiagnostics.failedRequests++);
     browserCdp.on("Fetch.requestPaused", (event) => {
       const url = new URL(event.request.url);
       const allowed =
@@ -1600,11 +1624,14 @@ async function smoke() {
     });
     await browserCdp.send("Page.enable");
     await browserCdp.send("Runtime.enable");
+    await browserCdp.send("Network.enable");
     await browserCdp.send("Fetch.enable", {
       patterns: [{ urlPattern: "*", requestStage: "Request" }],
     });
+    report.webUiDiagnostics.stage = "navigation";
     await browserCdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
     let dom;
+    report.webUiDiagnostics.stage = "render";
     await waitFor(
       async () => {
         const result = await browserCdp.send("Runtime.evaluate", {
@@ -1622,6 +1649,7 @@ async function smoke() {
       "Bundled web UI render",
       60000,
     );
+    report.webUiDiagnostics.stage = "screenshot";
     await delay(1000);
     // Do not inject the password into the browser or publish arbitrary DOM text.
     // This is explicitly UI-shell/login rendering, not authenticated UI retrieval.
@@ -1654,6 +1682,7 @@ async function smoke() {
       blockedExternalPageRequests: uiViolations.length,
     };
     assert.equal(uiViolations.length, 0, "Web UI attempted an external page request");
+    report.webUiDiagnostics.stage = "browser shutdown";
     await browserCdp.send("Browser.close").catch(() => {});
     await Promise.race([
       browser.done,
@@ -1709,6 +1738,34 @@ async function smoke() {
     report.phase = "complete";
   } catch (error) {
     await recordOwnedOmpLogFailures();
+    if (report.webUiDiagnostics) {
+      const messages = new Set([
+        "Headless browser startup exceeded its deadline",
+        "Bundled web UI render exceeded its deadline",
+        "Browser CDP connection deadline exceeded", "Browser CDP connection failed",
+        "Browser CDP command failed", "Browser CDP deadline exceeded", "Browser CDP closed",
+      ]);
+      report.webUiDiagnostics.failure = messages.has(error?.message)
+        ? error.message : "other recorded failure";
+      if (browserCdp) {
+        try {
+          const snapshot = await browserCdp.send("Runtime.evaluate", {
+            expression: `JSON.stringify({sameOrigin:location.origin===${JSON.stringify(uiOrigin)},titleContainsPaseo:/paseo/i.test(document.title),bodyCharacters:(document.body?.innerText||"").length,passwordInputs:document.querySelectorAll("input[type=password]").length,controls:document.querySelectorAll("input,button,[role=button]").length})`,
+            returnByValue: true,
+          });
+          report.webUiDiagnostics.lastSurface = JSON.parse(snapshot.result.value);
+          if (report.webUiDiagnostics.lastSurface.sameOrigin) {
+            const screenshot = await browserCdp.send("Page.captureScreenshot", {
+              format: "png", captureBeyondViewport: false,
+            });
+            await writeFile(path.join(evidence, "web-ui.png"), Buffer.from(screenshot.data, "base64"));
+            report.webUiDiagnostics.failureScreenshot = "web-ui.png";
+          }
+        } catch {
+          report.webUiDiagnostics.surfaceUnavailable = true;
+        }
+      }
+    }
     // Never publish raw child output, error paths, stack traces or fixture secrets.
     report.failure = {
       type: error?.name ?? "Error",
