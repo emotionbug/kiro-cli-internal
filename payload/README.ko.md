@@ -47,7 +47,10 @@ Python 3.13.12(`runtime\python\python.exe`, 같은 바이너리의 `python3.exe`
 - 계정 데이터는 기본 `%LOCALAPPDATA%\KiroInternal`에 저장합니다. 다른 위치는 각 명령에 동일한 `--data-dir 절대경로`를 지정하세요. 사용한 데이터 폴더나 인증 SQLite를 재배포하지 마세요.
 - `auth.cmd logout`은 전용 HTTP 저장소만 로그아웃합니다. 모델 목록은 계정에서 가져오며 다른 모델로 몰래 전환하지 않습니다.
 - TLS 검증을 끄지 않습니다. 프록시 인증은 현재 사용자의 SSPI입니다. 회사 프록시 URL에 사용자명/비밀번호를 넣지 않습니다. PAC 오류는 DIRECT로 숨기지 않습니다. SOCKS/HTTPS upstream proxy와 PAC 대체 프록시 자동 failover는 지원하지 않습니다.
+- HTTPS CONNECT의 PAC는 암호화된 전체 경로가 아니라 호스트/포트 기준입니다. HTTPS 경로별 PAC 정책은 지원하지 않으며 호스트 기반 PAC 또는 승인된 명시적 프록시가 필요합니다.
 - 본인 신뢰가 필요한 비공식 HTTP/OAuth 플러그인이며 도구는 사용자 권한으로 실행됩니다. 회사의 보안·서비스 정책과 코드 서명/허용목록 승인을 먼저 확인하세요.
+
+OMP 없는 저메모리 경로를 직접 선택하려면 데몬을 중지한 뒤 전용 `paseo/config.json`에서 `agents.providers["kiro-http"].enabled=true`, `agents.providers["kiro-omp-http"].enabled=false`로 바꾸고 재기동하여 **새** 에이전트의 `Kiro HTTP` 제공자를 선택합니다. 기존 세션 변환이나 자동 fallback은 하지 않습니다. 사용량은 계정 할당량이며 세션 토큰 소비량이 아닙니다.
 
 ## 검증 범위
 

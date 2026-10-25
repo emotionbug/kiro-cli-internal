@@ -449,6 +449,7 @@ async function smoke() {
     );
     let generations = 0,
       catalogs = 0,
+      quotaRequests = 0,
       toolResultSeen = false,
       finalSent = false;
     const tlsServer = https.createServer(
@@ -474,6 +475,40 @@ async function smoke() {
           }
           const body = JSON.parse(raw);
           if (host === "management.us-east-1.kiro.dev") {
+            if (request.headers["x-amz-target"] === "AmazonCodeWhispererService.GetUsageLimits") {
+              assert.equal(body.origin, "KIRO_CLI");
+              assert.equal(body.isEmailRequired, false);
+              quotaRequests++;
+              const reset = Math.floor(Date.now() / 1000) + 86400;
+              response.writeHead(200, { "content-type": "application/x-amz-json-1.0" });
+              response.end(
+                JSON.stringify({
+                  nextDateReset: reset,
+                  subscriptionInfo: { type: "Q_DEVELOPER_STANDALONE_PRO_PLUS" },
+                  overageConfiguration: { overageStatus: "DISABLED" },
+                  usageBreakdownList: [
+                    {
+                      resourceType: "CREDIT",
+                      unit: "INVOCATIONS",
+                      currency: "USD",
+                      currentUsage: 12,
+                      currentUsageWithPrecision: 12.375,
+                      usageLimit: 100,
+                      usageLimitWithPrecision: 100.5,
+                      nextDateReset: reset,
+                      currentOverages: 0,
+                      currentOveragesWithPrecision: 0,
+                      overageCharges: 0,
+                      overageRate: 0.04,
+                      overageCap: 10000,
+                      overageCapWithPrecision: 10000,
+                      bonuses: [],
+                    },
+                  ],
+                }),
+              );
+              return;
+            }
             assert.equal(
               request.headers["x-amz-target"],
               "KiroControlPlaneBearerService.ListAvailableModels",
@@ -667,6 +702,13 @@ async function smoke() {
       "Root network.cmd with public extra CA",
     );
     await checked(cmd("models", ["--data-dir", data]), "Root models.cmd");
+    const directQuota = JSON.parse(
+      await checked(cmd("usage", ["--data-dir", data]), "Root usage.cmd"),
+    );
+    const directBalance = directQuota.balances.find((balance) => balance.id === "credits-base");
+    assert.equal(directBalance.used, 12.375);
+    assert.equal(directBalance.limit, 100.5);
+    assert.equal(directBalance.remaining, 88.125);
     const catalog = JSON.parse(await readFile(path.join(data, "models.json"), "utf8"));
     assert.deepEqual(catalog.models.map((model) => model.id).sort(), ["auto", "fixture-named"]);
     const config = JSON.parse(await readFile(path.join(data, "paseo/config.json"), "utf8"));
@@ -830,6 +872,33 @@ async function smoke() {
         "127.0.0.1 only; original service hostnames never resolved by fixture",
     };
     assert.equal(violations.length, 0, "An unexpected network destination was attempted");
+    const sdkQuota = JSON.parse(
+      await checked(
+        cmd("paseo", ["--data-dir", data, "--", "usage", "--refresh", "--json"]),
+        "Paseo installed Kiro usage source",
+      ),
+    );
+    const accountQuota = sdkQuota.find((entry) =>
+      entry.report?.balances?.some((balance) => balance.id === "credits-base"),
+    );
+    assert.equal(
+      accountQuota?.report.status,
+      "available",
+      "Paseo did not expose this managed Kiro account quota",
+    );
+    const sdkBalance = accountQuota.report.balances.find(
+      (balance) => balance.id === "credits-base",
+    );
+    assert.equal(sdkBalance.used, 12.375);
+    assert.equal(sdkBalance.remaining, 88.125);
+    report.quota = {
+      direct: "available",
+      paseoSdk: "available",
+      unit: "credits",
+      used: sdkBalance.used,
+      remaining: sdkBalance.remaining,
+      requests: quotaRequests,
+    };
 
     report.phase = "standalone OMP actual terminal surface";
     const pty = require("node-pty");
@@ -877,6 +946,8 @@ async function smoke() {
       }),
     ]);
     assert.equal(tuiResult.exitCode, 0, "Standalone OMP terminal did not exit cleanly");
+    // A naturally exited ConPTY still owns node-pty's output worker until killed.
+    tui.kill();
     await waitFor(
       async () => !(await liveOwned(tuiOwned)).length,
       "Standalone OMP proxy cleanup",

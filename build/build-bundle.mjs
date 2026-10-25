@@ -65,6 +65,22 @@ await mkdir(cache, { recursive: true });
 await mkdir(path.dirname(output), { recursive: true });
 const work = await mkdtemp(path.join(cache, "assemble-"));
 const systemTar = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+const producerAbort = new AbortController();
+let producerStage = "startup";
+let commandSupervisor;
+function checkpoint(name) {
+  producerAbort.signal.throwIfAborted();
+  producerStage = name;
+  process.stderr.write(`[build] ${name}\n`);
+}
+function interrupt(signal) {
+  process.exitCode = signal === "SIGINT" ? 130 : 143;
+  producerAbort.abort(new Error(`Build interrupted by ${signal} during ${producerStage}`));
+}
+const onSigint = () => interrupt("SIGINT");
+const onSigterm = () => interrupt("SIGTERM");
+process.on("SIGINT", onSigint);
+process.on("SIGTERM", onSigterm);
 
 async function digest(file, algorithm = "sha256") {
   const hash = createHash(algorithm);
@@ -84,35 +100,309 @@ async function json(file, value) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 }
-async function run(command, args, { cwd = work, env = process.env, capture = false } = {}) {
+async function run(
+  command,
+  args,
+  {
+    cwd = work,
+    env = process.env,
+    capture = false,
+    phase = path.basename(command),
+    timeoutMs = 120000,
+  } = {},
+) {
+  producerAbort.signal.throwIfAborted();
+  const label = `${producerStage}/${path.basename(phase).replace(/[^A-Za-z0-9._-]/g, "_")}`;
+  const started = Date.now();
+  const captureLimit = 16 * 1024 * 1024;
+  const drainMs = 5000;
+  process.stderr.write(`[build] ${label} started; deadline ${timeoutMs}ms\n`);
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      env,
-      windowsHide: true,
-      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    });
-    let stdout = "",
-      stderr = "";
-    if (capture) {
-      child.stdout.on("data", (data) => {
-        stdout += data;
-      });
-      child.stderr.on("data", (data) => {
-        stderr += data;
-      });
-    }
-    child.on("error", reject);
-    child.on("exit", (code) =>
-      code === 0
-        ? resolve(stdout)
-        : reject(
-            new Error(
-              `${path.basename(command)} failed (${code})${capture ? `\n${stderr}\n${stdout}` : ""}`,
-            ),
+    let child;
+    let exited = false;
+    let settled = false;
+    let failure;
+    let outputBytes = 0;
+    const stdout = [];
+    let drainTimer;
+    let cleanupTimer;
+    let deadlineTimer;
+    const error = (reason) =>
+      new Error(`[build] ${label} ${reason} after ${Date.now() - started}ms`);
+    const finish = (problem, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      clearTimeout(drainTimer);
+      clearTimeout(cleanupTimer);
+      producerAbort.signal.removeEventListener("abort", onAbort);
+      child?.stdin?.destroy();
+      if (problem) reject(problem);
+      else {
+        process.stderr.write(`[build] ${label} completed in ${Date.now() - started}ms\n`);
+        resolve(value);
+      }
+    };
+    const terminate = (problem) => {
+      if (settled || failure) return;
+      failure = problem;
+      clearTimeout(deadlineTimer);
+      clearTimeout(drainTimer);
+      // ChildProcess.kill uses the owned process handle on Windows, not a PID lookup.
+      // The supervisor's non-inherited job handle closes with it and kills its entire job.
+      if (child?.pid && !exited) {
+        try {
+          if (!child.kill("SIGKILL"))
+            failure = error(`${problem.message}; owned process termination was unavailable`);
+        } catch {
+          failure = error(`${problem.message}; owned process termination failed`);
+        }
+      }
+      cleanupTimer = setTimeout(() => {
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        child?.unref();
+        finish(
+          error(
+            `${failure.message}; owned process/pipes did not close within ${drainMs}ms of termination`,
           ),
+        );
+      }, drainMs);
+    };
+    const onAbort = () => terminate(error("interrupted"));
+    producerAbort.signal.addEventListener("abort", onAbort, { once: true });
+    deadlineTimer = setTimeout(
+      () => terminate(error(`exceeded its ${timeoutMs}ms deadline`)),
+      timeoutMs,
     );
+    try {
+      child = spawn(commandSupervisor ?? command, commandSupervisor ? [command, ...args] : args, {
+        cwd,
+        env,
+        windowsHide: true,
+        // The supervisor's stdin is an ownership lease; its target receives NUL.
+        stdio: [
+          commandSupervisor ? "pipe" : "ignore",
+          capture ? "pipe" : "inherit",
+          capture ? "pipe" : "inherit",
+        ],
+      });
+    } catch (problem) {
+      finish(error(`could not start (${problem.code ?? "spawn failure"})`));
+      return;
+    }
+    if (capture) {
+      const captureData = (data, isStderr) => {
+        if (settled) return;
+        outputBytes += data.length;
+        if (outputBytes > captureLimit) {
+          terminate(
+            error(`exceeded the ${captureLimit}-byte combined stdout/stderr capture limit`),
+          );
+          return;
+        }
+        if (isStderr) process.stderr.write(data);
+        else if (!failure) stdout.push(data);
+      };
+      child.stdout.on("data", (data) => captureData(data, false));
+      child.stderr.on("data", (data) => captureData(data, true));
+      child.stdout.on("error", () => terminate(error("stdout capture failed")));
+      child.stderr.on("error", () => terminate(error("stderr capture failed")));
+    }
+    child.once("error", (problem) =>
+      terminate(error(`could not start or terminate (${problem.code ?? "process error"})`)),
+    );
+    child.stdin?.on("error", () => terminate(error("owned process lease failed")));
+    child.once("exit", () => {
+      exited = true;
+      if (failure || settled) return;
+      // Resolve only on close (including pipe EOF), but never wait indefinitely for inherited pipes.
+      drainTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(error(`stdout/stderr did not reach EOF within ${drainMs}ms of process exit`));
+      }, drainMs);
+    });
+    child.once("close", (code, signal) => {
+      if (failure) finish(failure);
+      else if (code !== 0) finish(error(`failed (${signal ?? code})`));
+      else finish(null, capture ? Buffer.concat(stdout).toString("utf8") : "");
+    });
   });
+}
+
+async function prepareCommandSupervisor() {
+  const source = path.join(work, "owned-command.cs");
+  const executable = path.join(work, "owned-command.exe");
+  // Build-only helper: atomically assign targets to a kill-on-close Job Object at
+  // CreateProcess time, including the interval before the target starts executing.
+  // No process-name/PID-tree termination, suspended orphan, or shipped runtime dependency.
+  await writeFile(
+    source,
+    String.raw`
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+internal static class OwnedCommand {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct BasicLimits {
+    public long ProcessTime, JobTime;
+    public uint Flags;
+    public UIntPtr MinWorkingSet, MaxWorkingSet;
+    public uint ActiveProcesses;
+    public UIntPtr Affinity;
+    public uint Priority, Scheduling;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct IoCounters {
+    public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ExtendedLimits {
+    public BasicLimits Basic;
+    public IoCounters Io;
+    public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct StartupInfo {
+    public int Size;
+    public IntPtr Reserved, Desktop, Title;
+    public uint X, Y, XSize, YSize, XChars, YChars, Fill, Flags;
+    public ushort ShowWindow, ReservedBytes;
+    public IntPtr ReservedData, Input, Output, Error;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct StartupInfoEx {
+    public StartupInfo Startup;
+    public IntPtr Attributes;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ProcessInfo {
+    public IntPtr Process, Thread;
+    public uint ProcessId, ThreadId;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct SecurityAttributes {
+    public int Size;
+    public IntPtr Descriptor;
+    [MarshalAs(UnmanagedType.Bool)] public bool Inherit;
+  }
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool SetInformationJobObject(IntPtr job, int kind, ref ExtendedLimits limits, uint size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returnedSize);
+  [DllImport("kernel32.dll")]
+  private static extern void DeleteProcThreadAttributeList(IntPtr list);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfoEx startup, out ProcessInfo process);
+  [DllImport("kernel32.dll")]
+  private static extern IntPtr GetStdHandle(int kind);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern IntPtr CreateFileW(string name, uint access, uint share, ref SecurityAttributes security, uint creation, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+  [DllImport("kernel32.dll")]
+  private static extern bool CloseHandle(IntPtr handle);
+
+  private static string Quote(string value) {
+    var text = new StringBuilder("\"");
+    int slashes = 0;
+    foreach (char character in value) {
+      if (character == '\\') { slashes++; continue; }
+      if (character == '"') text.Append('\\', slashes * 2 + 1).Append('"');
+      else text.Append('\\', slashes).Append(character);
+      slashes = 0;
+    }
+    return text.Append('\\', slashes * 2).Append('"').ToString();
+  }
+  private static void Check(bool success) {
+    if (!success) throw new Win32Exception(Marshal.GetLastWin32Error());
+  }
+  public static int Main(string[] args) {
+    IntPtr job = IntPtr.Zero, attributes = IntPtr.Zero, jobValue = IntPtr.Zero, input = IntPtr.Zero;
+    bool attributesInitialized = false;
+    ProcessInfo process = new ProcessInfo();
+    try {
+      if (args.Length == 0) return 125;
+      job = CreateJobObject(IntPtr.Zero, null);
+      Check(job != IntPtr.Zero);
+      var limits = new ExtendedLimits();
+      limits.Basic.Flags = 0x00002000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedLimits))));
+      // Parent pipe EOF also closes our job if the producer is killed without a signal.
+      var lease = new System.Threading.Thread(delegate() {
+        try { Console.OpenStandardInput().ReadByte(); } catch { }
+        Environment.Exit(125);
+      });
+      lease.IsBackground = true;
+      lease.Start();
+      var security = new SecurityAttributes();
+      security.Size = Marshal.SizeOf(typeof(SecurityAttributes));
+      security.Inherit = true;
+      input = CreateFileW("NUL", 0x80000000, 3, ref security, 3, 0, IntPtr.Zero);
+      Check(input != new IntPtr(-1));
+      IntPtr size = IntPtr.Zero;
+      InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+      Check(size != IntPtr.Zero);
+      attributes = Marshal.AllocHGlobal(size);
+      Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size));
+      attributesInitialized = true;
+      jobValue = Marshal.AllocHGlobal(IntPtr.Size);
+      Marshal.WriteIntPtr(jobValue, job);
+      // PROC_THREAD_ATTRIBUTE_JOB_LIST: supported by Windows 10 / Server 2016+.
+      Check(UpdateProcThreadAttribute(attributes, 0, (IntPtr)0x0002000D, jobValue, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero));
+      var startup = new StartupInfoEx();
+      startup.Startup.Size = Marshal.SizeOf(typeof(StartupInfoEx));
+      startup.Startup.Flags = 0x00000100; // STARTF_USESTDHANDLES
+      startup.Startup.Input = input;
+      startup.Startup.Output = GetStdHandle(-11);
+      startup.Startup.Error = GetStdHandle(-12);
+      startup.Attributes = attributes;
+      var command = new StringBuilder(String.Join(" ", Array.ConvertAll(args, Quote)));
+      // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW. Environment/CWD are inherited.
+      Check(CreateProcessW(null, command, IntPtr.Zero, IntPtr.Zero, true, 0x08080000, IntPtr.Zero, null, ref startup, out process));
+      Check(WaitForSingleObject(process.Process, 0xffffffff) == 0);
+      uint exitCode;
+      Check(GetExitCodeProcess(process.Process, out exitCode));
+      return unchecked((int)exitCode);
+    } catch (Win32Exception error) {
+      Console.Error.WriteLine("owned-command startup/wait failed (Win32 " + error.NativeErrorCode + ")");
+      return 125;
+    } catch {
+      Console.Error.WriteLine("owned-command supervisor failed");
+      return 125;
+    } finally {
+      // Kill any remaining descendants before closing our inherited output handles.
+      if (job != IntPtr.Zero) CloseHandle(job);
+      if (input != IntPtr.Zero && input != new IntPtr(-1)) CloseHandle(input);
+      if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
+      if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
+      if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
+      if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
+      if (jobValue != IntPtr.Zero) Marshal.FreeHGlobal(jobValue);
+    }
+  }
+}
+`,
+  );
+  // Inbox Framework csc is a single owned process, without a shell or compiler server.
+  await run(
+    path.join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "Microsoft.NET/Framework64/v4.0.30319/csc.exe",
+    ),
+    ["/nologo", "/optimize+", "/platform:x64", "/target:exe", `/out:${executable}`, source],
+    { phase: "compile-owned-command.exe", timeoutMs: 60000 },
+  );
+  commandSupervisor = executable;
 }
 async function acquire(name) {
   const spec = inputs.assets[name];
@@ -128,7 +418,7 @@ async function acquire(name) {
   }
   const partial = path.join(work, `${name}${extension}`);
   const response = await fetch(spec.url, {
-    signal: AbortSignal.timeout(600000),
+    signal: AbortSignal.any([producerAbort.signal, AbortSignal.timeout(600000)]),
     redirect: "follow",
   });
   if (!response.ok || !response.body)
@@ -166,7 +456,12 @@ async function copyTree(source, destination, include = () => true) {
 }
 async function extract(archive, destination, strip = 0, include) {
   await mkdir(destination, { recursive: true });
-  const members = (await run(systemTar, ["-tf", archive], { capture: true }))
+  const members = (
+    await run(systemTar, ["-tf", archive], {
+      capture: true,
+      phase: `${path.basename(destination)}-list`,
+    })
+  )
     .split(/\r?\n/)
     .filter(Boolean);
   for (const member of members) {
@@ -187,14 +482,18 @@ async function extract(archive, destination, strip = 0, include) {
     await writeFile(list, `${selected.join("\n")}\n`);
     selection = ["-T", list];
   }
-  await run(systemTar, [
-    "-xf",
-    archive,
-    "-C",
-    destination,
-    ...(strip ? ["--strip-components", String(strip)] : []),
-    ...selection,
-  ]);
+  await run(
+    systemTar,
+    [
+      "-xf",
+      archive,
+      "-C",
+      destination,
+      ...(strip ? ["--strip-components", String(strip)] : []),
+      ...selection,
+    ],
+    { phase: `${path.basename(destination)}-extract` },
+  );
   await tree(destination); // Reject every link, including links that point inside the tree.
 }
 async function assertFile(relative) {
@@ -228,20 +527,29 @@ async function guardPayload(source) {
 }
 
 try {
+  checkpoint("owned-process-supervisor");
+  await prepareCommandSupervisor();
+  checkpoint("payload");
   const payload = path.join(repo, "payload");
   await guardPayload(payload);
   await mkdir(output);
   await copyTree(payload, output);
   const acquired = {};
-  for (const name of Object.keys(inputs.assets)) acquired[name] = await acquire(name);
+  for (const name of Object.keys(inputs.assets)) {
+    checkpoint(`acquire-${name}`);
+    acquired[name] = await acquire(name);
+  }
+  checkpoint("node");
   const nodeExtract = path.join(work, "node");
   await extract(acquired.node, nodeExtract, 1);
   await copyTree(nodeExtract, path.join(output, "runtime/node"));
   await mkdir(path.join(output, "runtime/omp"), { recursive: true });
   await copyFile(acquired.omp, path.join(output, "runtime/omp/omp.exe"));
+  checkpoint("git");
   const gitRoot = path.join(output, "runtime/git");
   await mkdir(gitRoot, { recursive: true });
-  await run(acquired.git, ["-y", `-o${gitRoot}`]);
+  await run(acquired.git, ["-y", `-o${gitRoot}`], { phase: "PortableGit.exe", timeoutMs: 180000 });
+  checkpoint("utilities");
   const utilities = await assembleUtilities({
     output,
     work,
@@ -253,6 +561,7 @@ try {
     digest,
     json,
   });
+  checkpoint("native-proxy");
   const proxyRoot = path.join(output, "runtime/proxy");
   await mkdir(proxyRoot, { recursive: true });
   const nativeSource = path.join(repo, "native/kiro-proxy.cpp");
@@ -323,6 +632,7 @@ try {
     scope:
       "Direct imports only; source API review and actual Server 2019 execution remain distinct requirements",
   };
+  checkpoint("terminal");
   const terminalExtract = path.join(work, "terminal");
   await extract(acquired.wezterm, terminalExtract);
   const terminalEntries = (await tree(terminalExtract)).filter((file) =>
@@ -351,6 +661,7 @@ try {
     path.join(output, "runtime/terminal/wezterm.lua"),
     `local wezterm = require 'wezterm'\nreturn {\n  front_end = 'Software', max_fps = 30, animation_fps = 1,\n  scrollback_lines = 3000, check_for_updates = false, font_size = 11,\n  default_prog = {'cmd.exe', '/d', '/c', wezterm.config_dir .. '/../../omp.cmd'},\n  exit_behavior = 'CloseOnCleanExit',\n}\n`,
   );
+  checkpoint("plugin");
   const source = path.join(work, "plugin");
   await extract(acquired.plugin, source, 1);
   const plugin = path.join(output, "app/plugin/omp-kiro");
@@ -413,6 +724,7 @@ try {
     NPM_CONFIG_USERCONFIG: path.join(work, "npmrc"),
     NPM_CONFIG_GLOBALCONFIG: path.join(work, "global-npmrc"),
   });
+  checkpoint("npm-ci");
   await run(
     node,
     [
@@ -427,8 +739,9 @@ try {
       "--cache",
       path.join(cache, "npm"),
     ],
-    { cwd: app, env },
+    { cwd: app, env, phase: "npm-cli.js", timeoutMs: 180000 },
   );
+  checkpoint("node-pty-prebuilds");
   const ptyPrebuilds = path.join(app, "node_modules/node-pty/prebuilds");
   for (const entry of await readdir(ptyPrebuilds)) {
     if (entry !== "win32-x64")
@@ -436,6 +749,7 @@ try {
   }
   // Exact npm tarballs already contain N-API node-pty prebuilds, esbuild.exe and sherpa DLLs.
   // No install hooks, node-gyp, downloads or compiler toolchain are needed at runtime.
+  checkpoint("required-payload");
   for (const relative of [
     "start.cmd",
     "omp.cmd",
@@ -471,24 +785,30 @@ try {
     APPDATA: work,
     PATH: env.PATH,
   };
+  checkpoint("native-validation");
   const validationText = await run(node, [path.join(repo, "build/validate-windows.mjs"), output], {
     cwd: app,
     env: probeEnv,
     capture: true,
+    phase: "validate-windows.mjs",
+    timeoutMs: 300000,
   });
   const validation = JSON.parse(validationText.trim().split(/\r?\n/).at(-1));
+  checkpoint("native-proxy-probe");
   const proxyValidationText = await run(
     node,
     [path.join(repo, "build/probe-native-proxy.mjs"), output],
-    { cwd: app, env: probeEnv, capture: true },
+    { cwd: app, env: probeEnv, capture: true, phase: "probe-native-proxy.mjs", timeoutMs: 180000 },
   );
   const proxyValidation = JSON.parse(proxyValidationText.trim().split(/\r?\n/).at(-1));
+  checkpoint("git-probes");
   await run(path.join(gitRoot, "cmd/git.exe"), ["--version"], { env: probeEnv, capture: true });
   await run(
     path.join(gitRoot, "bin/bash.exe"),
     ["--noprofile", "--norc", "-c", "printf KIRO_BASH_READY"],
     { env: probeEnv, capture: true },
   );
+  checkpoint("licenses");
   // Only safe structured validation evidence is shipped; temporary compiler results stay in work.
   const licenses = path.join(output, "LICENSES");
   await mkdir(path.join(licenses, "sources"), { recursive: true });
@@ -527,6 +847,7 @@ try {
   });
   await json(path.join(licenses, "NATIVE-PROXY-IMPORTS.json"), nativeImports);
   await json(path.join(output, "native-proxy-validation.json"), proxyValidation);
+  checkpoint("npm-inventory");
   const packages = [];
   for (const [name, item] of Object.entries(lock.packages)) {
     if (!name || !(await exists(path.join(app, name, "package.json")))) continue;
@@ -556,6 +877,7 @@ try {
     publishedWebUi: true,
     builtinPluginsPreserved: true,
   });
+  checkpoint("payload-hashes");
   const files = await tree(output);
   for (const file of files) file.sha256 = await digest(path.join(output, file.path));
   const pythonInterpreterFiles = files
@@ -639,11 +961,15 @@ try {
     manifestSelfHash:
       "Excluded to avoid recursion; the ZIP SHA-256 authenticates this manifest too.",
   };
+  checkpoint("manifest");
   await json(path.join(output, "bundle-manifest.json"), manifest);
   const archiveFiles = await tree(output);
+  checkpoint("zip");
   await writeZip(output, archiveFiles, zipPath, inputs.sourceDateEpoch);
+  checkpoint("zip-checksum");
   const sha256 = await digest(zipPath);
   await writeFile(`${zipPath}.sha256`, `${sha256}  ${path.basename(zipPath)}\n`, { flag: "wx" });
+  checkpoint("complete");
   console.log(
     JSON.stringify({
       root: output,
@@ -656,6 +982,14 @@ try {
       pythonInterpreterFiles: pythonInterpreterFiles.map((file) => file.path),
     }),
   );
+} catch (error) {
+  process.stderr.write(`[build] ${producerStage} failed\n`);
+  throw error;
 } finally {
-  await rm(work, { recursive: true, force: true });
+  try {
+    await rm(work, { recursive: true, force: true });
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  }
 }

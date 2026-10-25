@@ -50,6 +50,8 @@ runtime\tools\jq.exe --version
 
 Python은 embeddable 배포판 기반의 **표준 라이브러리 유틸 용도**입니다. pip·ensurepip·Tk·과학 계산 패키지·완전한 프로젝트 개발 환경을 포함하지 않습니다. 기본 모듈 검색은 격리돼 있어 현재 폴더/스크립트 옆 모듈을 자동 import하지 않습니다. 프로젝트 환경은 자체 virtualenv 등을 명시적으로 사용하세요. 표준 입출력은 UTF-8로 구성하지만 일반 텍스트 파일은 `encoding="utf-8"`을 명시하는 것이 안전합니다. `-S`는 입출력 사용자 설정도 건너뜁니다. 정확한 입력·변경 고지·검증은 ZIP의 `manifests/utilities.json`과 `LICENSES/UTILITY-CHANGES.txt`에 있습니다.
 
+더 적은 메모리가 필요하면 **명시적으로** OMP 없는 `Paseo → Kiro HTTP` 경로도 선택할 수 있습니다. 이 데몬을 중지하고 전용 `paseo/config.json`의 `agents.providers["kiro-http"].enabled`를 `true`, `agents.providers["kiro-omp-http"].enabled`를 `false`로 바꾼 뒤 다시 시작하여 새 에이전트의 `Kiro HTTP` 제공자를 선택합니다. 기존 OMP 세션을 변환하거나 자동 fallback하지 않습니다. OMP 실행기는 별도로 계속 사용할 수 있습니다. 사용량 표시는 계정 할당량이며 개별 세션의 토큰 소비량과 다릅니다.
+
 ### 네트워크·인증·데이터
 
 ```bat
@@ -64,6 +66,10 @@ network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem
 네트워크를 변경하기 전에 `stop.cmd`로 이 데몬을 중지합니다. 주소는 대상 PC의 사용자 데이터에만 저장되며 ZIP에 미리 넣지 않습니다. 프록시 사용자명/비밀번호를 URL에 넣지 않습니다. upstream 프록시 인증은 현재 Windows 사용자의 SSPI Negotiate/NTLM을 사용합니다. localhost·127.0.0.1·::1은 우회하고 TLS 검증은 유지합니다. Node는 Windows 신뢰 저장소를 사용하며 공개 CA 인증서를 Bun용 PEM으로 내보냅니다. 시스템 프록시/인증서 설정은 변경하지 않습니다.
 
 지원 범위는 HTTP upstream 프록시, HTTP/CONNECT, Windows 시스템 설정 및 HTTP(S)/로컬 파일 PAC입니다. PAC 오류를 임의 DIRECT로 숨기지 않습니다. SOCKS·HTTPS-to-proxy 및 PAC의 두 번째 프록시로 자동 failover는 제공하지 않습니다. PAC 파일 서버 자체에 대한 인증 위임은 하지 않으므로 그 서버가 인증을 요구하면 승인된 로컬 PAC 파일을 사용하세요.
+
+HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호스트:포트/`를 대상으로 합니다. HTTPS 경로별 PAC 분기가 필요한 정책은 이 구조로 보장하지 않으므로 호스트 기반 PAC 또는 승인된 명시적 프록시 구성이 필요합니다.
+
+방화벽 승인 검토의 시작 목록은 `prod.us-east-1.auth.desktop.kiro.dev`, `runtime.us-east-1.kiro.dev`, `management.us-east-1.kiro.dev`이며 계정 프로필에 따라 `eu-central-1` runtime/management 호스트를 사용합니다. Builder ID/Identity Center는 지정 region의 `oidc.<region>.amazonaws.com`도 사용합니다. 브라우저 쪽은 `app.kiro.dev`, `view.awsapps.com`/조직 AWS SSO 및 선택한 Google/GitHub/기업 IdP 리디렉션을 승인해야 할 수 있습니다. 이 목록이 모든 IdP 리디렉션을 포괄한다는 뜻은 아닙니다.
 
 사용자 데이터 기본 경로는 `%LOCALAPPDATA%\KiroInternal`이며 인증 SQLite·Paseo/OMP 상태·목록·설정이 ZIP 밖에 저장됩니다. 사용자와 SYSTEM만 허용하는 ACL을 생성합니다. 공용 폴더나 다른 프로그램의 비어 있지 않은 데이터 폴더를 가져오지 않습니다. 별도 사용은 각 명령에 `--data-dir 절대경로`를 일관되게 지정합니다. `auth.cmd logout`은 이 HTTP 저장소만 로그아웃합니다.
 
