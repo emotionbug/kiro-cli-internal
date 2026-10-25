@@ -282,7 +282,7 @@ export async function ensureOmpSettings(state) {
   try {
     await writeFile(
       file,
-      "startup:\n  checkUpdate: false\n  setupWizard: false\n  changelogMode: hidden\nmarketplace:\n  autoUpdate: 'off'\n",
+      "startup:\n  checkUpdate: false\n  setupWizard: false\n  changelogMode: hidden\nmarketplace:\n  autoUpdate: 'off'\nretry:\n  enabled: true\n  maxRetries: 10\n  baseDelayMs: 500\n  maxDelayMs: 300000\n  modelFallback: false\n  fallbackChains: {}\n  waitForUsageReset: false\n",
       { flag: "wx", mode: 0o600 },
     );
   } catch (error) {

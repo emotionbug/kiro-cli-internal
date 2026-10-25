@@ -313,6 +313,9 @@ internal static class OwnedCommand {
   private static extern bool CloseHandle(IntPtr handle);
 
   private static string Quote(string value) {
+    // Match libuv argv quoting; SFX launchers may parse their own switches.
+    if (value.Length > 0 && value.IndexOf(' ') < 0 && value.IndexOf('\t') < 0 && value.IndexOf('"') < 0)
+      return value;
     var text = new StringBuilder("\"");
     int slashes = 0;
     foreach (char character in value) {
@@ -361,7 +364,7 @@ internal static class OwnedCommand {
       Check(UpdateProcThreadAttribute(attributes, 0, (IntPtr)0x0002000D, jobValue, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero));
       var startup = new StartupInfoEx();
       startup.Startup.Size = Marshal.SizeOf(typeof(StartupInfoEx));
-      startup.Startup.Flags = 0x00000100; // STARTF_USESTDHANDLES
+      startup.Startup.Flags = 0x00000101; // STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW (SW_HIDE)
       startup.Startup.Input = input;
       startup.Startup.Output = GetStdHandle(-11);
       startup.Startup.Error = GetStdHandle(-12);
