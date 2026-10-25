@@ -8,14 +8,12 @@ import { access, readFile, mkdtemp, writeFile, rm, chmod } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-  startProxy,
-  validateNetwork,
-  helperEnvironment,
-  isLoopback,
-} from "../payload/app/lib/proxy.mjs";
-
 const bundleRoot = process.env.KIRO_TEST_BUNDLE_ROOT;
+const { startProxy, validateNetwork, helperEnvironment, isLoopback } = await import(
+  bundleRoot
+    ? pathToFileURL(join(bundleRoot, "app/lib/proxy.mjs")).href
+    : new URL("../payload/app/lib/proxy.mjs", import.meta.url).href
+);
 const bootstrap = bundleRoot
   ? pathToFileURL(join(bundleRoot, "app/lib/network-bootstrap.mjs")).href
   : new URL("../payload/app/lib/network-bootstrap.mjs", import.meta.url).href;

@@ -1,0 +1,51 @@
+{
+  "format": "reviewed-public-observation-excerpt",
+  "evidenceId": "ev_cdd8e8ace141aea7d01c57401c240620479781c4fd9a99f431c91bb148edef94",
+  "operation": "capture_process_scenario",
+  "authority": "controlled-replay",
+  "confidence": "observed",
+  "scope": "Real Kiro tools/list and web_search through the reconstructed HTTP client using existing managed authentication. No generation request. This is an excerpt, not a canonical complete REA Evidence bundle.",
+  "exit": { "code": 0, "reason": "exited", "signal": 0 },
+  "truncated": false,
+  "observations": [
+    {
+      "atMs": 860,
+      "operation": "tools/list",
+      "webTools": [
+        {
+          "name": "web_search",
+          "inputSchema": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": { "query": { "type": "string", "description": "The search query to execute. Must be 200 characters or less." } },
+            "required": ["query"]
+          }
+        }
+      ]
+    },
+    {
+      "atMs": 1820,
+      "operation": "web_search",
+      "count": 10,
+      "sources": [
+        { "title": "Built-in tools", "url": "https://kiro.dev/docs/tools/web/", "maxVerbatimWordLimit": 30 },
+        { "title": "Built-in tools", "url": "https://kiro.dev/docs/tools/", "maxVerbatimWordLimit": 30 },
+        { "title": "sample-kiro-cli-prompts-for-product-teams/.kiro/steering/market-research.md at main · aws-samples/sample-kiro-cli-prompts-for-product-teams · GitHub", "url": "https://github.com/aws-samples/sample-kiro-cli-prompts-for-product-teams/blob/main/.kiro/steering/market-research.md", "maxVerbatimWordLimit": 30 }
+      ]
+    }
+  ],
+  "limitations": [
+    "Artifact identity is unavailable for this observation.",
+    "The executable digest is a prelaunch file sample; matching path metadata immediately after spawn does not prove an atomic operating-system image binding.",
+    "Process trees are sampled and may omit short-lived descendants.",
+    "Filesystem observations are before/after snapshots, not syscall traces.",
+    "Inherited host environment variables are not recorded and may affect results.",
+    "No filesystem observation paths were selected; filesystem effects remain unknown."
+  ],
+  "notProven": [
+    "Connectivity from the target closed network to the approved Kiro gateway",
+    "Remote web_fetch or full-page retrieval",
+    "Kiro generation while the account generation quota is exhausted",
+    "Server 2019 execution or a particular enterprise proxy policy"
+  ]
+}

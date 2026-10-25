@@ -113,10 +113,10 @@
       "sha256": "0831b5fc86c38a6f91e597629ec3d12cd24712c2ff9830a49a6661178b753163"
     },
     "plugin": {
-      "version": "0.4.0",
-      "commit": "ea833ca287082fdb17ec709db3d48834189a1054",
-      "url": "https://codeload.github.com/emotionbug/omp-kiro/tar.gz/ea833ca287082fdb17ec709db3d48834189a1054",
-      "sha256": "cd376d1fcfea4b7e74b7da42ed8f3046ef2d57de04ebd602402ff02d8d13dc00",
+      "version": "0.4.1",
+      "commit": "50b81563dfeb120d49ec0afe518abd9e27e7bf1c",
+      "url": "https://codeload.github.com/emotionbug/omp-kiro/tar.gz/50b81563dfeb120d49ec0afe518abd9e27e7bf1c",
+      "sha256": "45a185d820e41cde73903c9cf60688943dd3a27d03df904eef1f6620f5e544d7",
       "license": "Apache-2.0"
     },
     "paseoLicense": {

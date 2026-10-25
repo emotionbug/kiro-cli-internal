@@ -2,7 +2,7 @@
 
 Windows x64용 **오프라인 설치 패키지**입니다. 기본 경로는 `Paseo 웹 UI → OMP → omp-kiro HTTP → Kiro 서비스`이며, Kiro CLI 실행 파일이나 CLI 로그인 DB가 필요하지 않습니다.
 
-> **완전한 망 분리에서 Kiro 클라우드 추론은 불가능합니다.** 설치·기동에 필요한 실행 파일과 npm 의존성은 ZIP에 포함하지만, 로그인·모델 목록·사용량·응답 생성에는 승인된 외부 HTTPS 경로가 필요합니다. 기본값은 현재 Windows 사용자의 PAC/프록시 설정입니다.
+> 설치·기동에는 외부 다운로드가 필요하지 않습니다. **검색 대상 웹사이트에 PC가 직접 접속하지 않고 Kiro 서버에 검색을 맡깁니다.** 로그인·목록·사용량·검색·응답 생성에는 Kiro/인증 서비스로 연결되는 승인된 HTTPS 프록시·게이트웨이가 필요합니다. 그 경로까지 차단된 완전한 망 분리에서는 클라우드 기능을 사용할 수 없습니다. 기본값은 현재 Windows 사용자의 PAC/프록시 설정입니다.
 
 ## 새 HTTP 패키지
 
@@ -27,6 +27,14 @@ doctor.cmd --verify-all
 ```
 
 `models.cmd`는 실제 계정의 모델 목록을 다시 조회하고 이 패키지의 Paseo 카탈로그를 갱신합니다. 응답 생성 요청이나 다른 모델로의 자동 전환은 하지 않습니다. 로그인 계정이 달라지면 목록도 다시 가져옵니다. 다른 CLI가 설치돼 있다는 이유만으로 OMP 모델 목록에 Claude/Codex CLI가 모델로 추가되지는 않습니다.
+
+### 폐쇄망의 웹 검색
+
+HTTP 경로의 기본 `web_search`는 별도 검색 API 키 없이 **같은 Kiro 인증으로 `runtime.<region>.kiro.dev/mcp`에 검색을 요청**합니다. 인터넷 검색은 Kiro 서버가 수행하며, PC는 반환된 출처 URL을 자동으로 열거나 본문을 다운로드하지 않습니다. Exa·Brave 등 외부 검색 서비스로 fallback하지 않습니다. OMP 경로와 선택형 Paseo 직접 HTTP 경로 모두 이 도구를 제공합니다.
+
+검색 결과의 출처·인용 ID·`maxVerbatimWordLimit` 같은 재현 제한을 보존합니다. 검색 결과/발췌이지 전체 페이지 본문을 가져오는 도구가 아닙니다. 실제 계정의 원격 도구 목록에는 `web_search`만 있었으며 `web_fetch`를 지원한다고 가정하지 않습니다. 다른 OMP 도구의 직접 URL 읽기는 Kiro의 본문 대행 기능이 아니므로 외부 웹 차단 환경의 대안으로 안내하지 않습니다.
+
+[실제 Kiro 검색 관측 발췌](releases/0.4.0/kiro-web-search-observation.json): 검색 10건과 출처/재현 제한을 확인했습니다. 이 관측은 대상 회사망의 연결이나 사용량 한도가 소진된 계정의 응답 생성을 검증한 것은 아닙니다.
 
 ### 메모리와 Python
 
@@ -75,9 +83,17 @@ HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호
 
 동봉 `omp-kiro`는 **비공식 Kiro HTTP/OAuth 구현**입니다. 서비스 변경·계정 정책의 영향을 받습니다. 계정 승인은 사용자 본인이 해야 하며, 설치 과정에서 기존 CLI 인증 DB를 자동 추출하지 않습니다. 플러그인은 비샌드박스 코드이고 도구가 사용자 권한으로 파일·명령을 실행할 수 있습니다. 회사의 프록시·AppLocker/WDAC·코드 서명·서비스 이용 정책 승인이 우선입니다.
 
+### 네트워크 끊김과 재시도
+
+- OMP 경로의 생성 재시도는 **OMP가 담당**합니다. 플러그인 안에서 생성 재시도를 중첩하지 않으며, 선택한 모델/provider와 대화 ID를 유지합니다. 이미 표시한 부분 텍스트는 문맥에 남기고 이어가고, 완료된 도구를 처음부터 다시 실행하지 않습니다. 모델 fallback과 사용량 초기화까지의 자동 대기는 꺼져 있습니다.
+- 선택형 Paseo 직접 HTTP 경로는 transport에서 제한 재시도합니다. 실패한 시도의 임시 텍스트는 같은 메시지에서 교체하며 도구는 완전한 응답 이후 실행합니다.
+- Paseo 웹 연결은 backoff로 재접속하여 관찰·구독·내역을 복구합니다. **수락 여부를 모르는 프롬프트는 자동 재전송하지 않습니다.** 배포 시 공개 Paseo 0.13.0의 정확한 입력 해시를 검사하고, 이 경우 큐를 재삽입하던 경계만 수정합니다. 변경된 JS/압축 파일과 HTML URL을 함께 갱신하여 이전 브라우저 캐시가 수정 전 코드를 사용하지 않게 합니다. 수정 기록·입력/출력 해시·변환 소스는 `LICENSES/PASEO-PROVENANCE.json`과 `LICENSES/sources/paseo-reconnect.mjs`에 있습니다.
+- 일시적 소켓/HTTP 오류와 rate limit은 제한 안에서 재시도하지만 영구 장애를 무한 반복으로 숨기지 않습니다. OAuth의 일회용 코드나 응답 유실로 성공 여부를 모르는 refresh 요청은 자동 재전송하지 않습니다. 서버가 정상 종료 형태로 일찍 닫은 의미적 누락은 관측된 종료 마커 없이는 감지할 수 없습니다.
+- 생성 요청이 서버에 도착한 뒤 응답이 유실되면 재시도 요청도 별도로 과금될 수 있습니다. 클라우드의 exactly-once/idempotency를 보장하지 않습니다.
+
 ### 구성·재현·검증 한계
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.0을 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.1을 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
 
 ```powershell
 # Windows x64 MSVC Developer Command 환경에서

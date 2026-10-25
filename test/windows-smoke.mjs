@@ -91,6 +91,25 @@ async function smoke() {
   const fileText = "KIRO_PORTABLE_REAL_OMP_WRITE\nUnicode: 한글 ✓\n";
   const outputFile = path.join(workspace, "chain result 한글.txt");
   const toolId = "portable-smoke-write-1";
+  const searchToolId = "portable-smoke-search-1";
+  const promptMarker = "KIRO_PORTABLE_RECOVERY_REQUEST";
+  const partialText = "KIRO_PORTABLE_INTERRUPTED_TEXT";
+  // The write tool is idempotent, so change its output after its first completed
+  // result. Re-executing that write during recovery would erase this sentinel.
+  const guardedFileText = `${fileText}RECOVERY_SENTINEL_MUST_SURVIVE\n`;
+  const searchQuery = "portable Kiro Windows 검색 qualification";
+  const searchResult = {
+    results: [
+      {
+        title: "Controlled Kiro citation",
+        url: "https://kiro-portable-source.invalid/qualification",
+        snippet: "KIRO_PORTABLE_CITATION_ONLY_NO_FETCH",
+        citationId: "portable-source-1",
+        maxVerbatimWordLimit: 17,
+      },
+    ],
+  };
+  const expectedGenerations = 5;
   const env = {
     ...process.env,
     NODE_OPTIONS: "",
@@ -450,8 +469,29 @@ async function smoke() {
     let generations = 0,
       catalogs = 0,
       quotaRequests = 0,
+      searchRequests = 0,
       toolResultSeen = false,
+      recoverySeen = false,
+      searchResultSeen = false,
+      partialTextRetained = false,
+      conversationId,
       finalSent = false;
+    const requestSequence = [];
+    // Inspect semantic records anywhere in current/history, rather than assuming
+    // the host retries with one exact internal message arrangement.
+    function records(value, predicate) {
+      if (!value || typeof value !== "object") return [];
+      return [
+        ...(predicate(value) ? [value] : []),
+        ...Object.values(value).flatMap((child) => records(child, predicate)),
+      ];
+    }
+    function completedResult(state, id) {
+      const results = records(state, (item) => item.toolUseId === id && "status" in item);
+      assert.equal(results.length, 1, "A completed tool result must occur exactly once in history");
+      assert.equal(results[0].status, "success", "Actual OMP tool result was not successful");
+      return results[0];
+    }
     const tlsServer = https.createServer(
       { key: await readFile(leafKey), cert: await readFile(leaf) },
       async (request, response) => {
@@ -462,7 +502,11 @@ async function smoke() {
             "Unexpected upstream HTTPS host",
           );
           assert.equal(request.method, "POST", "Unexpected upstream method");
-          assert.equal(request.url.split("?")[0], "/", "Unexpected upstream URL path");
+          const requestPath = request.url.split("?")[0];
+          assert.ok(
+            requestPath === "/" || requestPath === "/mcp",
+            "Unexpected upstream URL path",
+          );
           assert.equal(
             request.headers.authorization,
             `Bearer ${accessToken}`,
@@ -474,6 +518,29 @@ async function smoke() {
             assert.ok(raw.length < 16 * 1024 * 1024, "Upstream request too large");
           }
           const body = JSON.parse(raw);
+          if (requestPath === "/mcp") {
+            assert.equal(host, "runtime.us-east-1.kiro.dev", "Search must use the Kiro origin");
+            assert.equal(
+              request.headers["x-amzn-kiro-profile-arn"],
+              "arn:aws:codewhisperer:us-east-1:000000000000:profile/portable-fixture",
+              "Search must authenticate the selected Kiro profile in its header",
+            );
+            assert.equal(body.jsonrpc, "2.0");
+            assert.ok(typeof body.id === "string" && body.id.length > 0);
+            assert.equal(body.method, "tools/call", "Default search must invoke Kiro MCP");
+            assert.equal(body.params?.name, "web_search");
+            assert.deepEqual(body.params.arguments, { query: searchQuery });
+            assert.equal(generations, 4, "Kiro search must follow the recovered model tool call");
+            assert.equal(++searchRequests, 1, "Search must execute exactly once");
+            requestSequence.push("mcp:web_search");
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { content: [{ type: "text", text: JSON.stringify(searchResult) }] },
+            }));
+            return;
+          }
           if (host === "management.us-east-1.kiro.dev") {
             if (request.headers["x-amz-target"] === "AmazonCodeWhispererService.GetUsageLimits") {
               assert.equal(body.origin, "KIRO_CLI");
@@ -539,20 +606,50 @@ async function smoke() {
             "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
             "Unexpected generation API",
           );
-          const current = body.conversationState.currentMessage.userInputMessage;
+          const state = body.conversationState;
+          const current = state.currentMessage.userInputMessage;
           models.push(current.modelId);
           assert.equal(
             current.modelId,
-            "auto",
-            "Selected auto model must remain unchanged on every turn",
+            "fixture-named",
+            "Explicit non-default model must remain unchanged on every attempt and turn",
+          );
+          conversationId ??= state.conversationId;
+          assert.ok(conversationId, "Generation must identify its conversation");
+          assert.equal(state.conversationId, conversationId, "Recovery must continue the same conversation");
+          assert.equal(
+            JSON.stringify(state).split(promptMarker).length - 1,
+            1,
+            "Recovery must retain the original request exactly once, not replay an ambiguous prompt",
           );
           generations++;
-          response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+          assert.ok(generations <= expectedGenerations, "Unexpected extra generation");
+          const offered = current.userInputMessageContext.tools.map(
+            (tool) => tool.toolSpecification,
+          );
+          assert.equal(
+            new Set(offered.map((tool) => tool.name)).size,
+            offered.length,
+            "OMP must not offer duplicate tools",
+          );
+          const search = offered.find((tool) => tool.name === "web_search");
+          assert.ok(search?.inputSchema.json.properties.query, "Default OMP web_search was not offered");
           if (generations === 1) {
-            await sample("first real OMP model turn", daemon.child.pid);
-            const offered = current.userInputMessageContext.tools.map(
-              (tool) => tool.toolSpecification,
-            );
+            requestSequence.push("generation:503-before-output");
+            response.writeHead(503, {
+              "content-type": "application/x-amz-json-1.0",
+              "x-amzn-errortype": "ServiceUnavailableException",
+              "retry-after": "0",
+            });
+            response.end(JSON.stringify({
+              __type: "ServiceUnavailableException",
+              message: "Controlled transient service unavailable; retry the same model",
+            }));
+            return;
+          }
+          if (generations === 2) {
+            requestSequence.push("generation:write-tool");
+            await sample("real OMP pre-output retry recovered", daemon.child.pid);
             const write = offered.find((tool) => tool.name === "write");
             assert.ok(write, "Real OMP did not offer its write tool");
             const schema = write.inputSchema.json;
@@ -564,41 +661,95 @@ async function smoke() {
             if (schema.properties.ikey) input.ikey = "portable-smoke-write";
             for (const key of schema.required ?? [])
               assert.ok(key in input, "Write tool declares an unsupported required field");
-            response.end(
-              frame("toolUseEvent", {
-                toolUseId: toolId,
-                name: write.name,
-                input: JSON.stringify(input),
-                stop: true,
-              }),
-            );
-          } else {
-            assert.equal(
-              generations,
-              2,
-              "Unexpected extra generation (no synthetic success fallback)",
-            );
-            const result = current.userInputMessageContext.toolResults?.find(
-              (item) => item.toolUseId === toolId,
-            );
-            assert.equal(result?.status, "success", "Actual write tool result was not successful");
+            response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+            response.end(frame("toolUseEvent", {
+              toolUseId: toolId,
+              name: write.name,
+              input: JSON.stringify(input),
+              stop: true,
+            }));
+            return;
+          }
+          completedResult(state, toolId);
+          assert.equal(
+            records(state, (item) => item.toolUseId === toolId && item.name === "write").length,
+            1,
+            "Recovery must retain exactly one completed write call",
+          );
+          if (generations === 3) {
+            requestSequence.push("generation:partial-text-disconnect");
             assert.equal(
               await readFile(outputFile, "utf8"),
               fileText,
               "Actual OMP tool did not create the exact file",
             );
             toolResultSeen = true;
-            await sample("real write result returned upstream", daemon.child.pid);
-            finalSent = true;
-            response.end(
-              Buffer.concat([
-                frame("assistantResponseEvent", { content: "KIRO_PORTABLE_CHAIN_OK" }),
-                frame("metadataEvent", {
-                  tokenUsage: { uncachedInputTokens: 42, outputTokens: 8, totalTokens: 50 },
-                }),
-              ]),
-            );
+            await sample("real write result before transport disconnect", daemon.child.pid);
+            await writeFile(outputFile, guardedFileText);
+            const partial = frame("assistantResponseEvent", { content: partialText });
+            // An intentionally incomplete HTTP body makes this a transport
+            // failure, not a valid completed assistant response or error event.
+            response.writeHead(200, {
+              "content-type": "application/vnd.amazon.eventstream",
+              "content-length": partial.length + 1024,
+            });
+            response.flushHeaders();
+            response.write(partial);
+            await delay(300);
+            response.destroy();
+            return;
           }
+          assert.equal(
+            await readFile(outputFile, "utf8"),
+            guardedFileText,
+            "Recovery repeated the completed write side effect",
+          );
+          if (generations === 4) {
+            requestSequence.push("generation:recovered-search-tool");
+            recoverySeen = true;
+            partialTextRetained = JSON.stringify(state).includes(partialText);
+            assert.ok(
+              partialTextRetained,
+              "Recovery must resume committed partial text in history, not retry a fresh turn",
+            );
+            response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+            response.end(frame("toolUseEvent", {
+              toolUseId: searchToolId,
+              name: search.name,
+              input: JSON.stringify({ query: searchQuery }),
+              stop: true,
+            }));
+            return;
+          }
+          requestSequence.push("generation:final-with-citations");
+          assert.equal(searchRequests, 1, "The actual OMP search must reach Kiro MCP");
+          const result = completedResult(state, searchToolId);
+          const resultText = JSON.stringify(result.content);
+          for (const value of [
+            searchResult.results[0].url,
+            searchResult.results[0].snippet,
+            searchResult.results[0].citationId,
+            "maxVerbatimWordLimit",
+          ])
+            assert.ok(resultText.includes(value), "Model continuation lost Kiro citation data");
+          const payloads = records(result.content, (item) => typeof item.text === "string")
+            .map((item) => {
+              try { return JSON.parse(item.text); } catch { return undefined; }
+            });
+          assert.ok(
+            payloads.some((item) => item?.results?.some((source) =>
+              source.url === searchResult.results[0].url && source.maxVerbatimWordLimit === 17)),
+            "Model must receive the source-specific numeric quotation limit unchanged",
+          );
+          searchResultSeen = true;
+          finalSent = true;
+          response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+          response.end(Buffer.concat([
+            frame("assistantResponseEvent", { content: "KIRO_PORTABLE_CHAIN_OK" }),
+            frame("metadataEvent", {
+              tokenUsage: { uncachedInputTokens: 42, outputTokens: 8, totalTokens: 50 },
+            }),
+          ]));
         } catch (error) {
           fixtureFailure = error;
           response.destroy();
@@ -756,9 +907,10 @@ async function smoke() {
       "Readiness must correspond to the wrapper-owned daemon",
     );
     await sample("daemon ready before agent", daemon.child.pid);
-    report.phase = "actual Paseo CLI OMP write tool chain";
+    report.phase = "actual Paseo OMP recovery, completed-tool replay protection and Kiro search";
     const prompt =
-      "Use the write tool requested by the model to create the fixture file, then report the final model response.";
+      `${promptMarker}: Execute the tools requested by the model to create the fixture file ` +
+      "and search using default web_search, then report the final model response.";
     const cliOutput = await checked(
       cmd(
         "paseo",
@@ -772,7 +924,7 @@ async function smoke() {
           "--provider",
           "kiro-omp-http",
           "--model",
-          "kiro-http/auto",
+          "kiro-http/fixture-named",
           "--cwd",
           workspace,
           "--mode",
@@ -832,10 +984,19 @@ async function smoke() {
       "Final fixture response did not reach the actual Paseo transcript",
     );
     assert.ok(
-      toolResultSeen && finalSent && generations === 2,
-      "Two-turn actual tool chain was not observed",
+      toolResultSeen && recoverySeen && searchResultSeen && finalSent &&
+        generations === expectedGenerations,
+      "Actual OMP recovery and Kiro-only tool chain was not observed",
     );
-    assert.equal(await readFile(outputFile, "utf8"), fileText);
+    assert.deepEqual(requestSequence, [
+      "generation:503-before-output",
+      "generation:write-tool",
+      "generation:partial-text-disconnect",
+      "generation:recovered-search-tool",
+      "mcp:web_search",
+      "generation:final-with-citations",
+    ], "Actual bundled OMP must complete the full controlled recovery sequence");
+    assert.equal(await readFile(outputFile, "utf8"), guardedFileText);
     await delay(2000);
     const idle = await sample("completed agent after two seconds idle", daemon.child.pid);
     assert.ok(
@@ -851,14 +1012,34 @@ async function smoke() {
       provider: cliResult.provider,
       permissionMode: "full",
       generations,
+      requestSequence,
+      requestedModel: "kiro-http/fixture-named",
       selectedModelEveryTurn: models,
       catalogRequests: catalogs,
       discoveredModels: catalog.models.map((model) => model.id),
-      realTool: "write",
-      realToolResult: "success",
-      fileSHA256: createHash("sha256").update(fileText).digest("hex"),
+      realTools: ["write", "web_search"],
+      realToolResults: "success",
+      recovery: {
+        preOutputFailure: "HTTP 503 ServiceUnavailableException",
+        postToolFailure: "partial assistant event followed by incomplete-body TLS disconnect",
+        originalRequestOccursOnceEveryAttempt: true,
+        completedWriteCallAndResultOccurOnceInHistory: true,
+        completedWriteNotReexecuted: "post-write sentinel survived recovery and final completion",
+        interruptedTextRetainedInRetryHistory: partialTextRetained,
+      },
+      fileSHA256: createHash("sha256").update(guardedFileText).digest("hex"),
       finalResponseInPaseoTranscript: "KIRO_PORTABLE_CHAIN_OK",
       noKiroCliInBundleOrObservedChildren: true,
+    };
+    report.webSearch = {
+      surface: "default OMP web_search called by controlled model",
+      backend: "authenticated Kiro POST /mcp tools/call web_search through strict TLS proxy",
+      requests: searchRequests,
+      citationUrl: searchResult.results[0].url,
+      maxVerbatimWordLimit: searchResult.results[0].maxVerbatimWordLimit,
+      citationAndLimitReceivedByNextModelRequest: searchResultSeen,
+      returnedSourcesFetched: 0,
+      externalProviderRequests: violations.length,
     };
     report.transport = {
       mode: "manual",
@@ -954,7 +1135,12 @@ async function smoke() {
       15000,
     );
     tui = undefined;
-    assert.equal(generations, 2, "Opening the terminal must not send an unsolicited generation");
+    assert.equal(
+      generations,
+      expectedGenerations,
+      "Opening the terminal must not send an unsolicited generation",
+    );
+    assert.equal(searchRequests, 1, "Opening the terminal must not send an unsolicited search");
     report.standaloneOmp = {
       surface: "actual OMP TUI through Windows ConPTY and root omp.cmd --console",
       selectedModelRendered: "kiro-http/auto",
@@ -1143,6 +1329,9 @@ async function smoke() {
     // listed files. Snapshot all names and hashes before setup and after shutdown.
     await assertPristine();
     assert.equal(violations.length, 0);
+    if (fixtureFailure) throw fixtureFailure;
+    assert.equal(generations, expectedGenerations, "A qualification surface generated unsolicited output");
+    assert.equal(searchRequests, 1, "A qualification surface repeated the completed Kiro search");
     report.cleanup = {
       fixtureDaemonStopped: true,
       repeatedStop: "not_running",

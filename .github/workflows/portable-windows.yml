@@ -41,12 +41,14 @@ jobs:
         shell: pwsh
         run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache"
       - name: Extract the actual ZIP into a fresh Unicode path
+        id: extract
         shell: pwsh
         run: |
           $extracted = "$env:RUNNER_TEMP\Kiro package 설치"
           [System.IO.Compression.ZipFile]::ExtractToDirectory("$env:RUNNER_TEMP\$env:BUNDLE_NAME.zip", $extracted)
           "QUALIFIED_BUNDLE_ROOT=$extracted" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify proxy and private-state invariants
+        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
         run: |
           $env:KIRO_TEST_BUNDLE_ROOT = $env:QUALIFIED_BUNDLE_ROOT
@@ -56,9 +58,20 @@ jobs:
           $env:KIRO_TEST_SSPI_FIXTURE = $fixture
           npm test
       - name: Exercise offline Python, ripgrep and jq utilities
+        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
         run: node test/windows-utilities.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
+      - name: Exercise Paseo observation reconnect without prompt replay
+        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $node = "$env:QUALIFIED_BUNDLE_ROOT\runtime\node\node.exe"
+          $report = & $node test/paseo-reconnect.mjs --app "$env:QUALIFIED_BUNDLE_ROOT\app"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\qualification") | Out-Null
+          $report | Out-File -FilePath "$env:RUNNER_TEMP\qualification\reconnect.json" -Encoding utf8
       - name: Exercise offline install, actual web UI and OMP tool execution
+        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
         run: node test/windows-smoke.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
       - name: Retain qualified ZIP and safe evidence
@@ -82,6 +95,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           path: |
+            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
+            ${{ runner.temp }}/qualification/reconnect.json
             ${{ runner.temp }}/qualification/report.json
             ${{ runner.temp }}/qualification/utilities.json
             ${{ runner.temp }}/qualification/web-ui.png

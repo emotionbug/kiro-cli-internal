@@ -21,6 +21,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeZip } from "./archive.mjs";
 import { assembleUtilities } from "./assemble-utilities.mjs";
+import { applyPaseoReconnectFix } from "./paseo-reconnect.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "utf8"));
@@ -744,6 +745,10 @@ try {
     ],
     { cwd: app, env, phase: "npm-cli.js", timeoutMs: 180000 },
   );
+  checkpoint("paseo-reconnect-projection");
+  const paseoProjection = await applyPaseoReconnectFix(
+    path.join(app, "node_modules/@getpaseo/server"),
+  );
   checkpoint("node-pty-prebuilds");
   const ptyPrebuilds = path.join(app, "node_modules/node-pty/prebuilds");
   for (const entry of await readdir(ptyPrebuilds)) {
@@ -844,6 +849,10 @@ try {
     "Git for Windows is redistributed as its complete, unmodified PortableGit distribution; its licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component source packages and build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with each installed package; NPM-PACKAGES.json records exact public integrity pins. WezTerm component licenses remain under runtime/terminal. The native WinHTTP/SSPI helper is compiled from the accompanying repository source with a statically linked MSVC runtime; no Python, Px, runtime compiler or redistributable installer is required.\n",
   );
   await copyFile(nativeSource, path.join(licenses, "sources/kiro-proxy.cpp"));
+  await copyFile(
+    path.join(repo, "build/paseo-reconnect.mjs"),
+    path.join(licenses, "sources/paseo-reconnect.mjs"),
+  );
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
     source: "sources/kiro-proxy.cpp",
     sourceSha256: await digest(nativeSource),
@@ -885,6 +894,7 @@ try {
     tarball: lock.packages["node_modules/@getpaseo/server"],
     publishedWebUi: true,
     builtinPluginsPreserved: true,
+    sourceProjections: [paseoProjection],
   });
   checkpoint("payload-hashes");
   const files = await tree(output);
@@ -921,6 +931,7 @@ try {
     },
     inputs: inputs.assets,
     npmLockSha256: await digest(path.join(app, "package-lock.json")),
+    sourceProjections: [paseoProjection],
     nativeValidation: {
       ...validation,
       windowsRelease: os.release(),
@@ -964,7 +975,7 @@ try {
       sourcePayloadGuard: true,
       linksAllowed: false,
       sourceProjection:
-        "Only explicitly pinned public archives plus repository payload; no host installations or user configuration copied",
+        "Only pinned public archives with recorded build-time Paseo source projection, plus repository payload; no host installations or user configuration copied",
     },
     files,
     manifestSelfHash:
