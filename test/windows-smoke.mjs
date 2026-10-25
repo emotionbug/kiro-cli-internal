@@ -76,11 +76,13 @@ async function smoke() {
   const servers = [];
   const knownOwned = new Map();
   const browserOwned = new Map();
+  const tuiOwned = new Map();
   const violations = [];
   const models = [];
   let daemon,
     browser,
     browserCdp,
+    tui,
     fixtureFailure,
     pristine,
     stopComplete = false;
@@ -829,6 +831,69 @@ async function smoke() {
     };
     assert.equal(violations.length, 0, "An unexpected network destination was attempted");
 
+    report.phase = "standalone OMP actual terminal surface";
+    const pty = require("node-pty");
+    let tuiOutput = "",
+      tuiExit;
+    tui = pty.spawn(
+      process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+      ["/d", "/s", "/c", `""${path.join(bundle, "omp.cmd")}" --console --data-dir "${data}""`],
+      { name: "xterm-256color", cols: 100, rows: 30, cwd: workspace, env },
+    );
+    const tuiDone = new Promise((resolve) =>
+      tui.onExit((event) => {
+        tuiExit = event;
+        resolve(event);
+      }),
+    );
+    tui.onData((text) => {
+      tuiOutput = (tuiOutput + text).slice(-1024 * 1024);
+      if (text.includes("\x1b[6n")) tui.write("\x1b[1;1R");
+    });
+    await waitFor(
+      async () => {
+        if (tuiExit) {
+          recordCommandFailure("Standalone OMP TUI exited before readiness", {
+            code: tuiExit.exitCode,
+            stdout: tuiOutput,
+            stderr: "",
+          });
+          throw new Error("Standalone OMP exited before its terminal surface was ready");
+        }
+        const visible = tuiOutput.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+        return (
+          tuiOutput.includes("\x1b[") && /Fixture Auto|kiro-http\/auto|\bauto\b/i.test(visible)
+        );
+      },
+      "Standalone OMP TUI render",
+      60000,
+    );
+    await sample("standalone OMP terminal (separate launcher)", tui.pid, tuiOwned);
+    tui.write("\x04"); // Supported Ctrl+D shutdown with an empty editor.
+    const tuiResult = await Promise.race([
+      tuiDone,
+      delay(15000, undefined, { ref: false }).then(() => {
+        throw new Error("Standalone OMP did not handle terminal exit");
+      }),
+    ]);
+    assert.equal(tuiResult.exitCode, 0, "Standalone OMP terminal did not exit cleanly");
+    await waitFor(
+      async () => !(await liveOwned(tuiOwned)).length,
+      "Standalone OMP proxy cleanup",
+      15000,
+    );
+    tui = undefined;
+    assert.equal(generations, 2, "Opening the terminal must not send an unsolicited generation");
+    report.standaloneOmp = {
+      surface: "actual OMP TUI through Windows ConPTY and root omp.cmd --console",
+      selectedModelRendered: "kiro-http/auto",
+      terminalExit: "Ctrl+D",
+      cleanExit: true,
+      ownedProcessesRemaining: 0,
+      unsolicitedGenerations: 0,
+      wezTermGuiExercised: false,
+    };
+
     report.phase = "approved browser bundled web UI";
     const candidates = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
       .filter(Boolean)
@@ -1033,6 +1098,9 @@ async function smoke() {
     process.exitCode = 1;
   } finally {
     fixtureFailure = undefined;
+    try {
+      tui?.kill();
+    } catch {}
     if (browser?.child.exitCode === null) {
       try {
         await sample("browser cleanup ownership capture", browser.child.pid, browserOwned);
@@ -1054,7 +1122,7 @@ async function smoke() {
     }
     // Stop only exact, previously observed owned identities. PID reuse is checked
     // by process creation time; no image-name/global taskkill is ever used.
-    for (const target of [browserOwned, knownOwned]) {
+    for (const target of [browserOwned, tuiOwned, knownOwned]) {
       try {
         const entries = [...target.values()]
           .map((row) => `@{id=${row.pid};created='${row.created}'}`)
@@ -1078,7 +1146,9 @@ async function smoke() {
     try {
       await waitFor(
         async () =>
-          !(await liveOwned(knownOwned)).length && !(await liveOwned(browserOwned)).length,
+          !(await liveOwned(knownOwned)).length &&
+          !(await liveOwned(browserOwned)).length &&
+          !(await liveOwned(tuiOwned)).length,
         "Final fixture process cleanup",
         15000,
       );

@@ -40,10 +40,16 @@ jobs:
       - name: Assemble pinned native Windows distribution
         shell: pwsh
         run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache"
+      - name: Extract the actual ZIP into a fresh Unicode path
+        shell: pwsh
+        run: |
+          $extracted = "$env:RUNNER_TEMP\Kiro package 설치"
+          [System.IO.Compression.ZipFile]::ExtractToDirectory("$env:RUNNER_TEMP\$env:BUNDLE_NAME.zip", $extracted)
+          "QUALIFIED_BUNDLE_ROOT=$extracted" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify proxy and private-state invariants
         shell: pwsh
         run: |
-          $env:KIRO_TEST_BUNDLE_ROOT = "$env:RUNNER_TEMP\$env:BUNDLE_NAME"
+          $env:KIRO_TEST_BUNDLE_ROOT = $env:QUALIFIED_BUNDLE_ROOT
           $fixture = "$env:RUNNER_TEMP\kiro-sspi-fixture.exe"
           cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 native/sspi-fixture.cpp "/Fo$env:RUNNER_TEMP\kiro-sspi-fixture.obj" "/Fe$fixture" /link /SUBSYSTEM:CONSOLE /STACK:262144 ws2_32.lib secur32.lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -51,10 +57,10 @@ jobs:
           npm test
       - name: Exercise offline Python, ripgrep and jq utilities
         shell: pwsh
-        run: node test/windows-utilities.mjs "$env:RUNNER_TEMP\$env:BUNDLE_NAME" "$env:RUNNER_TEMP\qualification"
+        run: node test/windows-utilities.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
       - name: Exercise offline install, actual web UI and OMP tool execution
         shell: pwsh
-        run: node test/windows-smoke.mjs "$env:RUNNER_TEMP\$env:BUNDLE_NAME" "$env:RUNNER_TEMP\qualification"
+        run: node test/windows-smoke.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
       - name: Retain qualified ZIP and safe evidence
         uses: actions/upload-artifact@v4
         with:
@@ -67,3 +73,15 @@ jobs:
             ${{ runner.temp }}/${{ env.BUNDLE_NAME }}.zip.sha256
             ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
             ${{ runner.temp }}/qualification/
+      - name: Retain safe qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-windows-evidence
+          compression-level: 6
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/qualification/report.json
+            ${{ runner.temp }}/qualification/utilities.json
+            ${{ runner.temp }}/qualification/web-ui.png
