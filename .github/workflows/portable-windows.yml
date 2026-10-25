@@ -70,6 +70,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\qualification") | Out-Null
           $report | Out-File -FilePath "$env:RUNNER_TEMP\qualification\reconnect.json" -Encoding utf8
+      - name: Exercise cancellable offline OMP startup readiness
+        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $node = "$env:QUALIFIED_BUNDLE_ROOT\runtime\node\node.exe"
+          $report = & $node test/paseo-startup.mjs --app "$env:QUALIFIED_BUNDLE_ROOT\app"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\qualification") | Out-Null
+          $report | Out-File -FilePath "$env:RUNNER_TEMP\qualification\startup.json" -Encoding utf8
       - name: Exercise offline install, actual web UI and OMP tool execution
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
@@ -97,6 +106,7 @@ jobs:
           path: |
             ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
             ${{ runner.temp }}/qualification/reconnect.json
+            ${{ runner.temp }}/qualification/startup.json
             ${{ runner.temp }}/qualification/report.json
             ${{ runner.temp }}/qualification/utilities.json
             ${{ runner.temp }}/qualification/web-ui.png

@@ -83,17 +83,19 @@ HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호
 
 동봉 `omp-kiro`는 **비공식 Kiro HTTP/OAuth 구현**입니다. 서비스 변경·계정 정책의 영향을 받습니다. 계정 승인은 사용자 본인이 해야 하며, 설치 과정에서 기존 CLI 인증 DB를 자동 추출하지 않습니다. 플러그인은 비샌드박스 코드이고 도구가 사용자 권한으로 파일·명령을 실행할 수 있습니다. 회사의 프록시·AppLocker/WDAC·코드 서명·서비스 이용 정책 승인이 우선입니다.
 
+**사용자가 선택한 기본값은 Full access입니다.** Paseo의 OMP/직접 HTTP 새 세션과 독립 OMP는 파일 수정·삭제·명령 실행을 건별 승인 없이 사용자 권한으로 수행합니다. 최초 플러그인 신뢰 확인·로그인은 별도이며, 명시적으로 선택한 Ask/Plan은 유지합니다. OMP를 직접 실행할 때는 `omp.cmd --console -- --approval-mode always-ask`로 확인 모드를 선택할 수 있습니다.
+
 ### 네트워크 끊김과 재시도
 
-- OMP 경로의 생성 재시도는 **OMP가 담당**합니다. 플러그인 안에서 생성 재시도를 중첩하지 않으며, 선택한 모델/provider와 대화 ID를 유지합니다. 이미 표시한 부분 텍스트는 문맥에 남기고 이어가고, 완료된 도구를 처음부터 다시 실행하지 않습니다. 모델 fallback과 사용량 초기화까지의 자동 대기는 꺼져 있습니다.
-- 선택형 Paseo 직접 HTTP 경로는 transport에서 제한 재시도합니다. 실패한 시도의 임시 텍스트는 같은 메시지에서 교체하며 도구는 완전한 응답 이후 실행합니다.
-- Paseo 웹 연결은 backoff로 재접속하여 관찰·구독·내역을 복구합니다. **수락 여부를 모르는 프롬프트는 자동 재전송하지 않습니다.** 배포 시 공개 Paseo 0.13.0의 정확한 입력 해시를 검사하고, 이 경우 큐를 재삽입하던 경계만 수정합니다. 변경된 JS/압축 파일과 HTML URL을 함께 갱신하여 이전 브라우저 캐시가 수정 전 코드를 사용하지 않게 합니다. 수정 기록·입력/출력 해시·변환 소스는 `LICENSES/PASEO-PROVENANCE.json`과 `LICENSES/sources/paseo-reconnect.mjs`에 있습니다.
-- 일시적 소켓/HTTP 오류와 rate limit은 제한 안에서 재시도하지만 영구 장애를 무한 반복으로 숨기지 않습니다. OAuth의 일회용 코드나 응답 유실로 성공 여부를 모르는 refresh 요청은 자동 재전송하지 않습니다. 서버가 정상 종료 형태로 일찍 닫은 의미적 누락은 관측된 종료 마커 없이는 감지할 수 없습니다.
+- OMP와 선택형 Paseo 직접 HTTP의 네트워크 복구는 **HTTP transport가 담당**합니다. 인터넷·DNS·연결 단절과 일시적 HTTP 오류는 사용자 취소 전까지 **30초 고정 주기**로 계속 재시도합니다. 서버의 `Retry-After`가 더 길면 그 시간을 지킵니다. 패키지의 OMP 호스트 재시도는 꺼 중첩 재시도·모델 fallback을 막습니다.
+- 선택 모델/provider와 대화 ID를 유지합니다. OMP에 이미 표시한 부분 텍스트는 wire 문맥에 보존하고 이어가며, 완료된 도구 결과를 continuation에 중복 복사하거나 도구를 처음부터 재실행하지 않습니다. 직접 HTTP 경로는 실패한 시도의 임시 텍스트를 같은 메시지에서 교체합니다. 도구는 완전하고 유효한 응답을 받은 뒤 실행합니다.
+- Paseo 웹 재접속도 첫 시도부터 30초 주기이며 연결/구독/내역을 복구합니다. **수락 여부를 모르는 프롬프트는 자동 재전송하지 않습니다.** 공개 Paseo 0.13.0의 정확한 입력 해시를 검사하여 재접속 주기와 이 경우의 큐 재삽입 경계만 수정합니다. JS·압축 파일·HTML URL을 함께 갱신합니다. 기록·해시·변환 소스는 `LICENSES/PASEO-PROVENANCE.json`과 `LICENSES/sources/`에 있습니다.
+- 소유한 Kiro HTTP OMP 시작은 첫 30초 복구 대기 전에 종료되지 않도록 readiness를 ready/exit/cancel까지 기다립니다. 다른 제공자의 시작 제한과 시작 후 RPC 제한은 유지합니다. 잘못된 인증·권한·인증서·할당량/프로토콜 오류는 무한 재시도로 숨기지 않습니다. OAuth는 요청이 서버에 도착하지 않은 것이 확인되는 연결 전 실패만 재시도하며, 성공 여부를 모르는 일회용 교환/refresh는 자동 재전송하지 않습니다. 정상 종료 형태의 의미적 응답 누락은 관측된 종료 마커 없이는 감지할 수 없습니다.
 - 생성 요청이 서버에 도착한 뒤 응답이 유실되면 재시도 요청도 별도로 과금될 수 있습니다. 클라우드의 exactly-once/idempotency를 보장하지 않습니다.
 
 ### 구성·재현·검증 한계
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.1을 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.2를 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
 
 ```powershell
 # Windows x64 MSVC Developer Command 환경에서

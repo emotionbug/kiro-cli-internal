@@ -81,6 +81,11 @@ async function qualify() {
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
   const powershell = path.join(systemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
   const inspectionEnv = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) =>
+        /^(?:SystemDrive|ProgramFiles(?:\(x86\))?|ProgramW6432|PSModulePath|ComSpec|PROCESSOR_ARCHITECTURE)$/i.test(key),
+      ),
+    ),
     SystemRoot: systemRoot,
     WINDIR: systemRoot,
     PATH: path.join(systemRoot, "System32"),
@@ -220,8 +225,10 @@ async function qualify() {
     try {
       ready = await handshake;
       assert.equal(ready.event, "ready");
+      report.commandStage = "inspect-ready-python";
       const owned = await identity(ready.pid);
       job.child.stdin.end("continue\n");
+      report.commandStage = "run-python-stdlib-pipeline";
       const result = await job.done;
       assert.equal(result.code, 0, "Actual utility pipeline failed");
       assert.equal(result.stderr, "", "Utility pipeline emitted unexpected diagnostics");

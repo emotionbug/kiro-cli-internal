@@ -8,22 +8,36 @@ import { brotliCompress, gzip, constants as zlibConstants } from "node:zlib";
 // This is a build-time source projection, not a live vendor-file hotpatch.
 export const PASEO_BROWSER_ASSET = "dist/server/web-ui/_expo/static/js/web/index-b635bff8218cfcb57983de05f96c16ba.js";
 export const PASEO_BROWSER_INPUT_SHA256 = "788d0c5e8fe47f2a7b3b24de78f1c6990fbacf250429d6eb221dac48ea44b645";
-export const PASEO_BROWSER_PATCHED_SHA256 = "943af95370d25a88addbb73723262c2609cf926cd1742bdc3dac58f365159529";
+export const PASEO_BROWSER_PATCHED_SHA256 = "935153995eaaeb01324fd370a56d54d9e2357003377ed54a8615708d8babc06e";
 export const PASEO_BROWSER_PROJECTED_ASSET = `dist/server/web-ui/_expo/static/js/web/index-${PASEO_BROWSER_PATCHED_SHA256.slice(0, 32)}.js`;
 const original = 'catch(i){return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
 const projected = 'catch(i){if("unknown"===i?.outcome||"DAEMON_REQUEST_TIMEOUT"===i?.code)return{status:"failed",deliveryOutcome:"unknown",errorMessage:"Delivery outcome unknown. Reconnect and inspect the conversation before sending again."};return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
+export const PASEO_RECONNECT_PERIOD_MS = 30000;
+// Change both the displayed retry deadline and the actual timer default. The
+// public SDK already retries without an attempt limit and cancels on close;
+// equal base/cap delays make even its first retry wait the full 30 seconds.
+const reconnectBoundaries = [
+  "(this.config.reconnect?.baseDelayMs??1500)*2**this.reconnectAttempt",
+  "t=this.config.reconnect?.baseDelayMs??1500,s=this.config.reconnect?.maxDelayMs??3e4",
+];
 
 export function projectPaseoQueuedMessageRecovery(bytes) {
   const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== PASEO_BROWSER_INPUT_SHA256) {
     throw new Error(`Paseo queued-message projection refused changed public input: ${actual}`);
   }
-  const source = bytes.toString("utf8");
-  const index = source.indexOf(original);
-  if (index < 0 || source.indexOf(original, index + original.length) >= 0) {
-    throw new Error("Paseo queued-message projection requires exactly one matching send failure boundary");
+  let source = bytes.toString("utf8");
+  for (const [before, after] of [
+    [original, projected],
+    ...reconnectBoundaries.map((before) => [before, before.replace("1500", "3e4")]),
+  ]) {
+    const index = source.indexOf(before);
+    if (index < 0 || source.indexOf(before, index + before.length) >= 0) {
+      throw new Error("Paseo reconnect projection requires exactly one matching source boundary");
+    }
+    source = source.slice(0, index) + after + source.slice(index + before.length);
   }
-  return Buffer.from(source.slice(0, index) + projected + source.slice(index + original.length));
+  return Buffer.from(source);
 }
 
 // serverRoot is the @getpaseo/server package directory in a fresh staging tree.
@@ -66,7 +80,9 @@ export async function applyPaseoReconnectFix(serverRoot) {
   await rm(asset);
   for (const { prior } of outputs) if (prior) await rm(prior);
   return {
-    projection: "paseo-0.13.0-queued-message-unknown-delivery-no-replay",
+    projection: "paseo-0.13.0-fixed-30s-reconnect-and-unknown-delivery-no-replay",
+    reconnect: { baseDelayMs: PASEO_RECONNECT_PERIOD_MS, maxDelayMs: PASEO_RECONNECT_PERIOD_MS,
+      attempts: "unlimited until closed; existing authentication/security stops retained" },
     originalAsset: PASEO_BROWSER_ASSET,
     asset: PASEO_BROWSER_PROJECTED_ASSET,
     originalSha256: PASEO_BROWSER_INPUT_SHA256,

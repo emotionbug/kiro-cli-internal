@@ -16,7 +16,7 @@ import { runInNewContext } from "node:vm";
 import { gunzipSync, brotliDecompressSync } from "node:zlib";
 import {
   PASEO_BROWSER_ASSET, PASEO_BROWSER_PROJECTED_ASSET, PASEO_BROWSER_PATCHED_SHA256,
-  projectPaseoQueuedMessageRecovery,
+  PASEO_RECONNECT_PERIOD_MS, projectPaseoQueuedMessageRecovery,
 } from "../build/paseo-reconnect.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -81,12 +81,19 @@ const projectedBytes = browserRelative === PASEO_BROWSER_PROJECTED_ASSET
   ? browserBytes : projectPaseoQueuedMessageRecovery(browserBytes);
 assert.equal(createHash("sha256").update(projectedBytes).digest("hex"), PASEO_BROWSER_PATCHED_SHA256);
 if (browserRelative === PASEO_BROWSER_PROJECTED_ASSET) {
-  const html = await readFile(path.join(packageRoot, "dist/server/web-ui/index.html"), "utf8");
-  assert.ok(html.includes(PASEO_BROWSER_PROJECTED_ASSET.slice("dist/server/web-ui".length)));
+  const htmlBytes = await readFile(path.join(packageRoot, "dist/server/web-ui/index.html"));
+  const html = htmlBytes.toString("utf8");
+  assert.equal(html.split(PASEO_BROWSER_PROJECTED_ASSET.slice("dist/server/web-ui".length)).length, 2);
   assert.ok(!html.includes(PASEO_BROWSER_ASSET.slice("dist/server/web-ui".length)));
   await assert.rejects(readFile(path.join(packageRoot, PASEO_BROWSER_ASSET)), { code: "ENOENT" });
   for (const [suffix, decode] of [[".gz", gunzipSync], [".br", brotliDecompressSync]]) {
     assert.deepEqual(decode(await readFile(path.join(packageRoot, browserRelative + suffix))), browserBytes);
+    await assert.rejects(readFile(path.join(packageRoot, PASEO_BROWSER_ASSET + suffix)), { code: "ENOENT" });
+    // The package may omit compressed HTML; when present it must agree exactly.
+    let compressedHtml;
+    try { compressedHtml = await readFile(path.join(packageRoot, "dist/server/web-ui/index.html" + suffix)); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (compressedHtml) assert.deepEqual(decode(compressedHtml), htmlBytes);
   }
 }
 function queueSender(bytes) {
@@ -98,6 +105,28 @@ function queueSender(bytes) {
   return runInNewContext(`(${source.slice(begin + prefix.length, end)})`, { Map, Error }, { timeout: 1000 });
 }
 const sendQueued = queueSender(projectedBytes);
+// Exercise the two exact browser methods without bootstrapping Expo. Controlled
+// timers here inspect the shipped delay, never accelerate the real SDK below.
+const projectedSource = projectedBytes.toString("utf8");
+const retryMethodsStart = projectedSource.indexOf("emitDisconnectedStateForReconnect(e,t){");
+const retryMethodsEnd = projectedSource.indexOf("resolvePingProbe(){", retryMethodsStart);
+assert.ok(retryMethodsStart >= 0 && retryMethodsEnd > retryMethodsStart);
+const browserTimers = [];
+const BrowserRetry = runInNewContext(`(class {${projectedSource.slice(retryMethodsStart, retryMethodsEnd)}})`,
+  { Date, Math, String, setTimeout: (callback, delayMs) => { browserTimers.push({ callback, delayMs }); return browserTimers.length; } },
+  { timeout: 1000 });
+const browserRetry = Object.assign(new BrowserRetry(), {
+  config: {}, shouldReconnect: true, traceInstant() {},
+  updateConnectionState(state) { this.state = state; }, attemptConnect() { throw new Error("Unexpected VM connection"); },
+});
+for (const attempt of [0, 1, 10000]) {
+  browserRetry.reconnectAttempt = attempt;
+  const at = Date.now();
+  browserRetry.emitDisconnectedStateForReconnect("offline");
+  browserRetry.armReconnectTimer();
+  assert.equal(browserTimers.at(-1).delayMs, PASEO_RECONNECT_PERIOD_MS);
+  assert.ok(Math.abs(Date.parse(browserRetry.state.nextRetryAt) - at - PASEO_RECONNECT_PERIOD_MS) < 100);
+}
 report.browserProjection = { asset: browserRelative, observedSha256: browserHash, projectedSha256: PASEO_BROWSER_PATCHED_SHA256, cases: [] };
 for (const [name, error, expectedCopies] of [
   ["ambiguous-disconnect", Object.assign(new Error("lost acknowledgement"), { code: "DAEMON_CONNECTION_LOST", outcome: "unknown" }), 0],
@@ -120,11 +149,14 @@ for (const [name, error, expectedCopies] of [
   }
   report.browserProjection.cases.push({ name, sends, queuedCopiesAfterFailure: queue.get("agent").length, deliveryOutcome: result.deliveryOutcome });
 }
-const deadline = Date.now() + 60000;
+// Both acknowledgement scenarios share the same outage window: about 60s for
+// a rejected retry followed by recovery, then 30s to prove close cancels retry.
+const startedAt = Date.now();
+const deadline = startedAt + 105000;
 async function bounded(promise, label, maximum = 10000) {
   let timer;
   const remaining = Math.min(maximum, deadline - Date.now());
-  assert.ok(remaining > 0, "Reconnect qualification exceeded 60 second deadline");
+  assert.ok(remaining > 0, "Reconnect qualification exceeded 105 second deadline");
   try {
     return await Promise.race([
       promise,
@@ -132,13 +164,13 @@ async function bounded(promise, label, maximum = 10000) {
     ]);
   } finally { clearTimeout(timer); }
 }
-async function until(predicate, label) {
+async function until(predicate, label, maximum = 10000) {
   await bounded((async () => {
     while (!predicate()) {
       assert.ok(Date.now() < deadline, "Reconnect qualification deadline");
       await delay(20);
     }
-  })(), label);
+  })(), label, maximum);
 }
 
 // This fixture owns the runtime seam and the sole external-effect counter.
@@ -154,7 +186,7 @@ const runtime = {
     const state = { sessionId: randomUUID(), model, thinkingLevel: "off", isStreaming: false,
       isCompacting: false, messageCount: 0, queuedMessageCount: 0 };
     const session = {
-      input, state, closed: false, messages, pending: null,
+      input, state, closed: false, messages, pending: null, promptCalls: 0, toolExecutions: 0,
       environment: { ...isolatedEnvironment },
       onEvent(fn) { listeners.add(fn); return () => listeners.delete(fn); },
       emit(event) { for (const fn of listeners) fn(event); },
@@ -162,6 +194,7 @@ const runtime = {
         assert.equal(session.closed, false);
         assert.equal(state.isStreaming, false, "A prompt was replayed into the active turn");
         promptCalls++;
+        session.promptCalls++;
         state.isStreaming = true;
         const user = { role: "user", content: message, id: randomUUID(), timestamp: Date.now() };
         messages.push(user);
@@ -183,6 +216,7 @@ const runtime = {
         // would increment both the runtime prompt and external-effect counts.
         await writeFile(file, marker, { flag: "wx" });
         toolExecutions++;
+        session.toolExecutions++;
         session.emit({ type: "tool_execution_end", toolCallId, toolName: "write", result: { content: [{ type: "text", text: "written" }] }, isError: false });
         const assistant = { role: "assistant", provider: model.provider, model: model.id,
           responseId: randomUUID(), content: [{ type: "text", text: marker }], stopReason: "stop", timestamp: Date.now() };
@@ -212,13 +246,14 @@ const runtime = {
   },
 };
 
-let daemon, client, timeline, directory, proxy;
+let daemon, proxy;
+const scenarios = [];
 const sockets = new Set();
 const pairs = new Set();
 let offline = false, rejectedUpgrades = 0, handshakes = 0, promptFrames = 0;
 let dropAcknowledgement = false, hiddenAcknowledgements = 0;
 let proxyError;
-const timelineSignals = [], connectionStates = [], directorySnapshots = [];
+const upgradeEvents = [], frameCounts = new Map();
 const wss = new WebSocketServer({ noServer: true });
 function drop() {
   offline = true;
@@ -229,7 +264,8 @@ try {
   daemon = await bounded(createPaseoDaemon({
     listen: "127.0.0.1:0", paseoHome: process.env.PASEO_HOME,
     corsAllowedOrigins: [], staticDir: workspace, mcpDebug: false,
-    agentClients: { omp: provider }, agentStoragePath: path.join(home, "agents"),
+    agentClients: { omp: provider }, providerOverrides: { omp: { enabled: true } },
+    agentStoragePath: path.join(home, "agents"),
     relayEnabled: false, pluginsEnabled: false, mcpEnabled: false,
     browserToolsEnabled: false, enableTerminalAgentHooks: false,
     webUi: { enabled: false, distDir: null }, metadataGeneration: { providers: [] },
@@ -242,6 +278,8 @@ try {
   proxy = createServer((_request, response) => response.writeHead(404).end());
   proxy.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   proxy.on("upgrade", (request, socket, head) => {
+    const kind = new URL(request.url, "http://fixture").searchParams.get("fixture");
+    upgradeEvents.push({ kind, at: Date.now(), accepted: !offline });
     if (offline) {
       rejectedUpgrades++;
       socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
@@ -256,7 +294,10 @@ try {
       browser.on("message", (data, binary) => {
         if (!binary) {
           const frame = JSON.parse(data.toString());
-          if (frame.type === "session" && frame.message.type === "send_agent_message_request") promptFrames++;
+          if (frame.type === "session" && frame.message.type === "send_agent_message_request") {
+            promptFrames++;
+            frameCounts.set(kind, (frameCounts.get(kind) ?? 0) + 1);
+          }
         }
         if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary });
         else queue.push([data, binary]);
@@ -265,7 +306,7 @@ try {
       upstream.on("message", (data, binary) => {
         if (!binary && dropAcknowledgement) {
           const frame = JSON.parse(data.toString());
-          if (frame.type === "session" && frame.message.type === "send_agent_message_response") {
+          if (kind === "acknowledgement-lost" && frame.type === "session" && frame.message.type === "send_agent_message_response") {
             assert.equal(frame.message.payload.accepted, true);
             hiddenAcknowledgements++;
             dropAcknowledgement = false;
@@ -282,123 +323,158 @@ try {
     });
   });
   await bounded(new Promise((resolve, reject) => { proxy.once("error", reject); proxy.listen(0, "127.0.0.1", resolve); }), "proxy listen");
-  client = new DaemonClient({ url: `ws://127.0.0.1:${proxy.address().port}/ws`,
-    clientId: randomUUID(), clientType: "browser", logger,
-    // Production defaults remain enabled, including 1500ms base / 30000ms cap.
-    webSocketFactory: (url, options) => new WebSocket(url, options),
-  });
-  client.subscribeConnectionStatus((state) => connectionStates.push({ status: state.status, at: Date.now(), nextRetryAt: state.nextRetryAt }));
-  await bounded(client.connect(), "initial SDK connection");
-  const agent = await bounded(client.createAgent({ provider: "omp", cwd: workspace, model: "fixture/selected", title: "Reconnect qualification" }), "agent creation");
-  directory = client.observeAgents();
-  directory.subscribe({ snapshot: (snapshot) => directorySnapshots.push(snapshot), update() {}, error(error) { proxyError = error; } });
-  await bounded(directory.ready, "directory observation");
-  timeline = client.subscribeAgentTimeline(agent.id, (message) => timelineSignals.push(message));
-  await bounded(timeline.ready, "timeline observation");
-
   for (const kind of ["accepted-before-drop", "acknowledgement-lost"]) {
-    const marker = `RECONNECT_${kind.replaceAll("-", "_").toUpperCase()}`;
-    const before = await bounded(client.fetchAgentTimeline(agent.id, { direction: "tail", projection: "canonical", limit: 100 }), "pre-drop history");
-    const restoredBefore = timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length;
-    const directoryBefore = directorySnapshots.length;
-    const attemptsBefore = rejectedUpgrades;
-    const callsBefore = promptCalls;
-    const framesBefore = promptFrames;
-    const effectsBefore = toolExecutions;
-    const clientMessageId = randomUUID();
-    dropAcknowledgement = kind === "acknowledgement-lost";
-    let sdkDelivery, queuedResult;
-    let queued = new Map([[agent.id, [{ id: clientMessageId, text: marker, attachments: [] }]]]);
+    const state = { kind, timelineSignals: [], connectionStates: [], directorySnapshots: [] };
+    scenarios.push(state);
+    const client = state.client = new DaemonClient({
+      url: `ws://127.0.0.1:${proxy.address().port}/ws?fixture=${kind}`,
+      clientId: randomUUID(), clientType: "browser", logger,
+      reconnect: { enabled: true, baseDelayMs: PASEO_RECONNECT_PERIOD_MS, maxDelayMs: PASEO_RECONNECT_PERIOD_MS },
+      webSocketFactory: (url, options) => new WebSocket(url, options),
+    });
+    client.subscribeConnectionStatus((event) => state.connectionStates.push({ ...event, at: Date.now() }));
+    await bounded(client.connect(), "initial SDK connection");
+    const agent = state.agent = await bounded(client.createAgent({ provider: "omp", cwd: workspace, model: "fixture/selected", title: kind }), "agent creation");
+    state.directory = client.observeAgents();
+    state.directory.subscribe({ snapshot: (snapshot) => state.directorySnapshots.push(snapshot), update() {}, error(error) { proxyError = error; } });
+    await bounded(state.directory.ready, "directory observation");
+    state.timeline = client.subscribeAgentTimeline(agent.id, (message) => state.timelineSignals.push(message));
+    await bounded(state.timeline.ready, "timeline observation");
+    state.before = await bounded(client.fetchAgentTimeline(agent.id, { direction: "tail", projection: "canonical", limit: 100 }), "pre-drop history");
+    state.restoredBefore = state.timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length;
+    state.directoryBefore = state.directorySnapshots.length;
+    state.marker = `RECONNECT_${kind.replaceAll("-", "_").toUpperCase()}`;
+    state.clientMessageId = randomUUID();
+    state.queued = new Map([[agent.id, [{ id: state.clientMessageId, text: state.marker, attachments: [] }]]]);
     const submitMessage = async () => {
       try {
-        await client.sendAgentMessage(agent.id, `Write exactly one fixture marker ${marker}`, { messageId: clientMessageId });
-        sdkDelivery = { accepted: true };
+        await client.sendAgentMessage(agent.id, `Write exactly one fixture marker ${state.marker}`, { messageId: state.clientMessageId });
+        state.delivery = { accepted: true };
       } catch (error) {
-        sdkDelivery = { accepted: false, code: error.code, outcome: error.outcome };
+        state.delivery = { accepted: false, code: error.code, outcome: error.outcome };
         throw error;
       }
     };
-    const queuedInput = { agentId: agent.id, messageId: clientMessageId, submitMessage,
-      queue: { read: (id) => queued.get(id) ?? [], write: (update) => { queued = update(queued); } },
+    state.queuedInput = { agentId: agent.id, messageId: state.clientMessageId, submitMessage,
+      queue: { read: (id) => state.queued.get(id) ?? [], write: (update) => { state.queued = update(state.queued); } },
     };
-    // The transformed real browser function handles the SDK's real ambiguous
-    // acknowledgement error; catch-up is then allowed to drain that same queue.
-    const outcome = kind === "acknowledgement-lost"
-      ? sendQueued(queuedInput).then((result) => { queuedResult = result; return sdkDelivery; })
-      : submitMessage().then(() => sdkDelivery, () => sdkDelivery);
     if (kind === "accepted-before-drop") {
-      assert.deepEqual(await bounded(outcome, "accepted prompt acknowledgement"), { accepted: true });
-      drop();
+      await bounded(submitMessage(), "accepted prompt acknowledgement");
+      assert.deepEqual(state.delivery, { accepted: true });
+    } else {
+      dropAcknowledgement = true;
+      state.outcome = sendQueued(state.queuedInput).then((result) => { state.queuedResult = result; });
     }
-    await until(() => !client.isConnected && offline && promptCalls === callsBefore + 1, "disconnect and runtime prompt");
-    const active = daemon.agentManager.getAgent(agent.id);
+  }
+  await until(() => offline && scenarios.every(({ client }) => !client.isConnected) && promptCalls === 2, "disconnect and runtime prompts");
+  for (const state of scenarios) {
+    const active = daemon.agentManager.getAgent(state.agent.id);
     assert.equal(active.lifecycle, "running");
-    const turnId = active.activeTurnId;
-    assert.ok(turnId);
-    const runtimeSession = runtimes.find((session) => session.pending);
-    assert.ok(runtimeSession);
-    assert.equal(runtimeSession.closed, false);
-    assert.equal(runtimeSession.input.model, "fixture/selected");
-    const sessionId = runtimeSession.state.sessionId;
-    // Exercise two failed reconnects, not merely a close/open pair.
-    await until(() => rejectedUpgrades >= attemptsBefore + 2, "two automatic failed reconnects");
-    assert.equal(daemon.agentManager.getAgent(agent.id).activeTurnId, turnId);
-    assert.equal(runtimeSession.closed, false);
-    const toolCallId = await bounded(runtimeSession.finishOffline(marker), "offline tool and completion");
-    await until(() => daemon.agentManager.getAgent(agent.id).lifecycle === "idle", "active turn completes while disconnected");
-    const liveCountBeforeReconnect = timelineSignals.length;
-    offline = false;
-    await until(() => client.isConnected && timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length > restoredBefore && directorySnapshots.length > directoryBefore, "automatic reconnect and state resubscription");
-    // subscribeAgentTimeline restores live delivery, not missing history. As in
-    // the shipped UI, explicitly fetch after our last cursor (tail when empty).
+    state.turnId = active.activeTurnId;
+    assert.ok(state.turnId);
+    state.runtimeSession = runtimes.find((session) => session.pending?.message.includes(state.marker));
+    assert.ok(state.runtimeSession);
+    assert.equal(state.runtimeSession.input.model, "fixture/selected");
+    state.sessionId = state.runtimeSession.state.sessionId;
+  }
+  // Both SDKs must actually try at 30s while offline, then schedule the same
+  // delay again. No fake clock, reduced production delay, or mutation replay.
+  await until(() => scenarios.every(({ kind }) => upgradeEvents.some((event) => event.kind === kind && !event.accepted)), "real 30-second rejected reconnects", 35000);
+  for (const state of scenarios) {
+    assert.equal(daemon.agentManager.getAgent(state.agent.id).activeTurnId, state.turnId);
+    assert.equal(state.runtimeSession.closed, false);
+    state.toolCallId = await bounded(state.runtimeSession.finishOffline(state.marker), "offline tool and completion");
+    await until(() => daemon.agentManager.getAgent(state.agent.id).lifecycle === "idle", "active turn completes offline");
+    state.liveCountBeforeReconnect = state.timelineSignals.length;
+  }
+  offline = false;
+  await until(() => scenarios.every((state) => state.client.isConnected &&
+    state.timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length > state.restoredBefore &&
+    state.directorySnapshots.length > state.directoryBefore), "real 30-second retry and resubscription", 35000);
+  for (const state of scenarios) {
+    const { client, agent, before, runtimeSession, kind } = state;
     const catchUp = await bounded(client.fetchAgentTimeline(agent.id, {
       direction: before.endCursor ? "after" : "tail", ...(before.endCursor ? { cursor: before.endCursor } : {}),
       projection: "canonical", limit: 100,
     }), "cursor history catch-up");
     assert.equal(catchUp.error, null);
     assert.equal(catchUp.hasNewer, false);
-    assert.ok(catchUp.entries.some((entry) => entry.item.type === "assistant_message" && entry.item.text.includes(marker) && entry.turnId === turnId));
-    assert.ok(catchUp.entries.some((entry) => entry.item.type === "tool_call" && entry.turnId === turnId), "Offline tool is missing from recovered history");
+    assert.ok(catchUp.entries.some((entry) => entry.item.type === "assistant_message" && entry.item.text.includes(state.marker) && entry.turnId === state.turnId));
+    assert.ok(catchUp.entries.some((entry) => entry.item.type === "tool_call" && entry.turnId === state.turnId), "Offline tool is missing from recovered history");
     const full = await bounded(client.fetchAgentTimeline(agent.id, { direction: "tail", projection: "canonical", limit: 100 }), "complete history");
-    const users = full.entries.filter((entry) => entry.item.type === "user_message" && entry.item.clientMessageId === clientMessageId);
+    const users = full.entries.filter((entry) => entry.item.type === "user_message" && entry.item.clientMessageId === state.clientMessageId);
     assert.equal(users.length, 1, "Prompt was lost or duplicated in canonical history");
-    assert.equal(promptCalls - callsBefore, 1);
-    assert.equal(promptFrames - framesBefore, 1, "SDK replayed a mutation after transport loss");
-    assert.equal(toolExecutions - effectsBefore, 1);
+    assert.equal(runtimeSession.promptCalls, 1);
+    assert.equal(frameCounts.get(kind), 1, "SDK replayed a mutation after transport loss");
+    assert.equal(runtimeSession.toolExecutions, 1);
     assert.equal(abortCalls, 0, "Observation disconnect canceled the OMP turn");
-    assert.equal(runtimeSession.state.sessionId, sessionId);
+    assert.equal(runtimeSession.state.sessionId, state.sessionId);
     assert.equal(runtimeSession.closed, false);
-    const delivery = await bounded(outcome, "submission outcome");
-    if (kind === "acknowledgement-lost") assert.deepEqual(delivery, { accepted: false, code: "DAEMON_CONNECTION_LOST", outcome: "unknown" });
     if (kind === "acknowledgement-lost") {
-      assert.equal(queuedResult.deliveryOutcome, "unknown");
-      assert.equal(queued.get(agent.id).length, 0);
-      assert.equal((await sendQueued(queuedInput)).status, "missing");
-      assert.equal(promptCalls - callsBefore, 1);
-      assert.equal(promptFrames - framesBefore, 1);
+      await bounded(state.outcome, "ambiguous submission outcome");
+      assert.deepEqual(state.delivery, { accepted: false, code: "DAEMON_CONNECTION_LOST", outcome: "unknown" });
+      assert.equal(state.queuedResult.deliveryOutcome, "unknown");
+      assert.equal(state.queued.get(agent.id).length, 0);
+      assert.equal((await sendQueued(state.queuedInput)).status, "missing");
+      assert.equal(runtimeSession.promptCalls, 1);
+      assert.equal(frameCounts.get(kind), 1);
     }
-    assert.ifError(proxyError);
-    report.scenarios.push({ kind, agentId: agent.id, turnId, sessionId, clientMessageId, toolCallId,
-      promptFrames: promptFrames - framesBefore, runtimePrompts: promptCalls - callsBefore,
-      toolExecutions: toolExecutions - effectsBefore, rejectedReconnects: rejectedUpgrades - attemptsBefore,
-      delivery, recoveredEntries: catchUp.entries.length, recoveredUserCopies: users.length,
-      restoredSubscriptions: timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length - restoredBefore,
-      directorySnapshots: directorySnapshots.length - directoryBefore,
-      observationEventsAfterReconnect: timelineSignals.length - liveCountBeforeReconnect,
+    const reconnects = state.connectionStates.filter((event) => event.status === "disconnected" && event.nextRetryAt);
+    assert.ok(reconnects.length >= 2, "Missing initial and subsequent retry deadlines");
+    for (const event of reconnects)
+      assert.ok(Math.abs(Date.parse(event.nextRetryAt) - event.at - PASEO_RECONNECT_PERIOD_MS) < 100);
+    const upgrades = upgradeEvents.filter((event) => event.kind === kind);
+    assert.equal(upgrades.length, 3, "Expected initial handshake, rejected retry, recovered handshake");
+    for (let i = 1; i < upgrades.length; i++) {
+      const from = i === 1 ? reconnects[0].at : upgrades[i - 1].at;
+      assert.ok(upgrades[i].at - from >= PASEO_RECONNECT_PERIOD_MS - 100, "Reconnect happened before the fixed period");
+    }
+    report.scenarios.push({
+      kind, agentId: agent.id, turnId: state.turnId, sessionId: state.sessionId,
+      clientMessageId: state.clientMessageId, toolCallId: state.toolCallId,
+      promptFrames: frameCounts.get(kind), runtimePrompts: runtimeSession.promptCalls,
+      toolExecutions: runtimeSession.toolExecutions, rejectedReconnects: upgrades.filter((event) => !event.accepted).length,
+      delivery: state.delivery, recoveredEntries: catchUp.entries.length, recoveredUserCopies: users.length,
+      restoredSubscriptions: state.timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length - state.restoredBefore,
+      directorySnapshots: state.directorySnapshots.length - state.directoryBefore,
+      observationEventsAfterReconnect: state.timelineSignals.length - state.liveCountBeforeReconnect,
+      upgrades: upgrades.map(({ at, accepted }) => ({ elapsedMs: at - startedAt, accepted })),
     });
   }
+  assert.ifError(proxyError);
   assert.equal(hiddenAcknowledgements, 1);
+  assert.equal(promptCalls, 2);
+  assert.equal(promptFrames, 2);
+  assert.equal(toolExecutions, 2);
+  // Closing during a fresh outage must cancel the actual pending 30s timers.
+  drop();
+  await until(() => scenarios.every(({ client }) => !client.isConnected), "cancellation disconnect");
+  const upgradesBeforeClose = upgradeEvents.length;
+  const closedAt = Date.now();
+  await Promise.all(scenarios.map(({ client }) => client.close()));
+  await bounded(delay(PASEO_RECONNECT_PERIOD_MS + 150), "closed clients stay closed past retry deadline", 31000);
+  assert.equal(upgradeEvents.length, upgradesBeforeClose, "Closed SDK reconnected after cancellation");
+  assert.equal(promptFrames, 2);
+  assert.equal(promptCalls, 2);
+  assert.equal(toolExecutions, 2);
+  report.cancellation = { clients: scenarios.length, observedMs: Date.now() - closedAt, upgradesAfterClose: upgradeEvents.length - upgradesBeforeClose };
   report.handshakes = handshakes;
-  report.connectionStates = connectionStates.map(({ status, at, nextRetryAt }) => ({ status, elapsedMs: at - connectionStates[0].at,
-    ...(nextRetryAt ? { scheduledDelayMs: Math.max(0, Date.parse(nextRetryAt) - at) } : {}) }));
+  report.rejectedUpgrades = rejectedUpgrades;
+  report.browserRetry = { attempts: [0, 1, 10000], scheduledDelayMs: browserTimers.map(({ delayMs }) => delayMs) };
+  report.connectionStates = scenarios.flatMap(({ kind, connectionStates }) => connectionStates.map(({ status, at, nextRetryAt }) => ({
+    kind, status, elapsedMs: at - startedAt,
+    ...(nextRetryAt ? { scheduledDelayMs: Date.parse(nextRetryAt) - at } : {}),
+  })));
+  report.elapsedMs = Date.now() - startedAt;
   report.result = "passed";
 } finally {
-  // No process.exit: leaked fixture handles must remain visible to qualification.
-  // close() first invalidates owned subscription identities locally, so teardown
-  // never waits for an RPC acknowledgement over a deliberately broken socket.
-  await client?.close();
-  await timeline?.release().catch(() => {});
-  await directory?.release().catch(() => {});
+  // No process.exit: leaked fixture handles remain qualification failures.
+  // close() invalidates subscriptions before release, even on a broken socket.
+  await Promise.all(scenarios.map(({ client }) => client.close()));
+  for (const { timeline, directory } of scenarios) {
+    await timeline?.release().catch(() => {});
+    await directory?.release().catch(() => {});
+  }
   for (const pair of pairs) { pair.browser.terminate(); pair.upstream.terminate(); }
   for (const socket of sockets) socket.destroy();
   await new Promise((resolve) => wss.close(resolve));

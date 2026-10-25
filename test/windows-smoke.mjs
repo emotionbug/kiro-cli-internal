@@ -249,6 +249,19 @@ async function smoke() {
       exitCode: result.code,
       classifications: classes.length ? classes : ["UNCLASSIFIED_PRIVATE_OUTPUT"],
       ...(option ? { rejectedOption: option } : {}),
+      operationTokens: ["spawn", "open", "stat", "lstat", "mkdir", "realpath"].filter(
+        (operation) => new RegExp(`\\b${operation}\\b`, "i").test(text),
+      ),
+      referencedRuntimeRoles: [
+        ["bundled-omp", path.join(bundle, "runtime/omp/omp.exe")],
+        ["bundled-node", path.join(bundle, "runtime/node/node.exe")],
+        ["workspace", workspace],
+        ["managed-auth", path.join(data, "auth.sqlite3")],
+      ].filter(([, value]) =>
+        text.toLowerCase().includes(value.toLowerCase()) ||
+        text.toLowerCase().includes(JSON.stringify(value).slice(1, -1).toLowerCase()),
+      ).map(([role]) => role),
+      unpinnedOmpSpawn: /\bspawn\s+omp(?:\.exe)?\s+ENOENT\b/i.test(text),
     });
   }
   async function checked(job, label) {
@@ -477,6 +490,13 @@ async function smoke() {
       conversationId,
       finalSent = false;
     const requestSequence = [];
+    let beforeOutputFailureAt, partialFailureAt;
+    const retryCadence = [];
+    function observeRetry(kind, failedAt) {
+      const elapsedMs = performance.now() - failedAt;
+      assert.ok(elapsedMs >= 29000 && elapsedMs < 60000, "Transient retry must wait the requested 30-second period");
+      retryCadence.push({ kind, elapsedMs });
+    }
     // Inspect semantic records anywhere in current/history, rather than assuming
     // the host retries with one exact internal message arrangement.
     function records(value, predicate) {
@@ -635,6 +655,7 @@ async function smoke() {
           const search = offered.find((tool) => tool.name === "web_search");
           assert.ok(search?.inputSchema.json.properties.query, "Default OMP web_search was not offered");
           if (generations === 1) {
+            beforeOutputFailureAt = performance.now();
             requestSequence.push("generation:503-before-output");
             response.writeHead(503, {
               "content-type": "application/x-amz-json-1.0",
@@ -648,6 +669,7 @@ async function smoke() {
             return;
           }
           if (generations === 2) {
+            observeRetry("503-before-output", beforeOutputFailureAt);
             requestSequence.push("generation:write-tool");
             await sample("real OMP pre-output retry recovered", daemon.child.pid);
             const write = offered.find((tool) => tool.name === "write");
@@ -696,6 +718,7 @@ async function smoke() {
             response.flushHeaders();
             response.write(partial);
             await delay(300);
+            partialFailureAt = performance.now();
             response.destroy();
             return;
           }
@@ -705,6 +728,7 @@ async function smoke() {
             "Recovery repeated the completed write side effect",
           );
           if (generations === 4) {
+            observeRetry("partial-response-disconnect", partialFailureAt);
             requestSequence.push("generation:recovered-search-tool");
             recoverySeen = true;
             partialTextRetained = JSON.stringify(state).includes(partialText);
@@ -927,13 +951,12 @@ async function smoke() {
           "kiro-http/fixture-named",
           "--cwd",
           workspace,
-          "--mode",
-          "full",
+          // No mode override: qualify the packaged default Full access policy.
           "--wait-timeout",
-          "120s",
+          "240s",
           "--json",
         ],
-        { timeout: 150000 },
+        { timeout: 270000 },
       ),
       "Root paseo.cmd agent run",
     );
@@ -1013,6 +1036,7 @@ async function smoke() {
       permissionMode: "full",
       generations,
       requestSequence,
+      retryCadence,
       requestedModel: "kiro-http/fixture-named",
       selectedModelEveryTurn: models,
       catalogRequests: catalogs,
@@ -1389,7 +1413,7 @@ async function smoke() {
           .join(",");
         if (entries)
           await ps(
-            `foreach($r in @(${entries})) {$p=Get-Process -Id $r.id -ErrorAction SilentlyContinue; if($p -and $p.StartTime.ToUniversalTime().Ticks.ToString() -eq $r.created) {Stop-Process -Id $r.id -Force -ErrorAction SilentlyContinue}}`,
+            `foreach($r in @(${entries})) {$p=Get-Process -Id $r.id -ErrorAction SilentlyContinue; if($p -and $p.StartTime.ToUniversalTime().Ticks.ToString() -eq $r.created) {Stop-Process -Id $r.id -Force -ErrorAction SilentlyContinue}}; 'owned cleanup checked'`,
           );
       } catch {
         report.cleanupFailure = true;

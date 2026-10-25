@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { writeZip } from "./archive.mjs";
 import { assembleUtilities } from "./assemble-utilities.mjs";
 import { applyPaseoReconnectFix } from "./paseo-reconnect.mjs";
+import { applyPaseoOmpStartupFix } from "./paseo-omp-startup.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "utf8"));
@@ -749,6 +750,10 @@ try {
   const paseoProjection = await applyPaseoReconnectFix(
     path.join(app, "node_modules/@getpaseo/server"),
   );
+  const startupProjection = await applyPaseoOmpStartupFix(
+    path.join(app, "node_modules/@getpaseo/server"),
+  );
+  const sourceProjections = [paseoProjection, startupProjection];
   checkpoint("node-pty-prebuilds");
   const ptyPrebuilds = path.join(app, "node_modules/node-pty/prebuilds");
   for (const entry of await readdir(ptyPrebuilds)) {
@@ -853,6 +858,10 @@ try {
     path.join(repo, "build/paseo-reconnect.mjs"),
     path.join(licenses, "sources/paseo-reconnect.mjs"),
   );
+  await copyFile(
+    path.join(repo, "build/paseo-omp-startup.mjs"),
+    path.join(licenses, "sources/paseo-omp-startup.mjs"),
+  );
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
     source: "sources/kiro-proxy.cpp",
     sourceSha256: await digest(nativeSource),
@@ -894,7 +903,7 @@ try {
     tarball: lock.packages["node_modules/@getpaseo/server"],
     publishedWebUi: true,
     builtinPluginsPreserved: true,
-    sourceProjections: [paseoProjection],
+    sourceProjections,
   });
   checkpoint("payload-hashes");
   const files = await tree(output);
@@ -931,7 +940,7 @@ try {
     },
     inputs: inputs.assets,
     npmLockSha256: await digest(path.join(app, "package-lock.json")),
-    sourceProjections: [paseoProjection],
+    sourceProjections,
     nativeValidation: {
       ...validation,
       windowsRelease: os.release(),

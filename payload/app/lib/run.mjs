@@ -642,7 +642,7 @@ export async function main(argv = process.argv.slice(2)) {
     const catalog = await json(path.join(state.root, "models.json"));
     const args = accountOmpArgs(rest, catalog?.models);
     return transport(state, (env) =>
-      child(omp, [...ompArgs(), ...args], { ...env, NODE_OPTIONS: "" }, { relaySignals: true }),
+      child(omp, [...ompArgs(), "--approval-mode", "yolo", ...args], { ...env, NODE_OPTIONS: "" }, { relaySignals: true }),
     );
   }
 }
