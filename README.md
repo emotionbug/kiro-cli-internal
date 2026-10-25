@@ -47,6 +47,7 @@ HTTP 경로의 기본 `web_search`는 별도 검색 API 키 없이 **같은 Kiro
 - PAC: 내장 Python/Px 대신 **WinHTTP PAC + SSPI 네이티브 프록시 한 개**를 실행기 수명 동안 재사용합니다. worker 8개, 대기 연결 16개, 스트림 버퍼 16 KiB, 경로 캐시 32개/60초로 제한합니다.
 - 직접 연결 모드에는 프록시 프로세스를 띄우지 않습니다.
 - 빌드는 네이티브 프록시의 idle/warm **private bytes 및 working set 각각 32 MiB 이하**를 실제 Windows에서 확인해야 통과합니다. 이 수치는 전체 Paseo/OMP/브라우저나 공유 Windows PAC 서비스의 한도가 아닙니다. 측정값은 ZIP의 `bundle-manifest.json`에 기록합니다.
+- 해당 CI에서 네이티브 helper는 부하 후 private 약 **1.83 MiB / working set 약 5.77 MiB**였습니다. 완료한 에이전트 1개의 Paseo+OMP 스택은 합산 working set 약 **827 MiB / private 약 940 MiB**, 별도 Chrome 스택은 약 **679 MiB / 387 MiB**였습니다. 전체 스택이 경량 helper만큼 작다는 뜻은 아닙니다. 프로세스별 working set 합은 공유 페이지를 중복 셀 수 있으며 물리 메모리의 고유 합계나 상한이 아닙니다.
 - Electron과 별도 브라우저 엔진을 넣지 않습니다. WezTerm은 독립 OMP TUI를 열 때만 사용하며 Software 렌더링입니다.
 - owned Node 자식의 V8 old-space 기본 상한은 프로세스당 256 MiB입니다. **RSS/전체 메모리 상한이나 Bun/OMP 힙 제한이 아닙니다.** 사용자 설정 `nodeHeapMb`로 조정할 수 있습니다.
 - 로컬 음성 모델·릴레이·자동 제목 생성을 기본 비활성화합니다. Git 동시 실행은 2개로 줄입니다. 에이전트를 여러 개 열면 OMP도 여러 개 실행될 수 있으므로 사용 후 종료하세요.
@@ -114,6 +115,12 @@ node test/windows-smoke.mjs C:\Build\kiro-paseo-omp-http-0.4.0-windows-x64 C:\Bu
 ```
 
 [Windows 빌드·검증 워크플로](.github/workflows/portable-windows.yml)는 실제 Node/native addon/PTY/플러그인 컴파일, WinHTTP PAC와 CONNECT, 메모리, 사용자 상태 격리 및 제어된 upstream을 통한 실제 OMP 도구 실행을 검사합니다. 제어된 upstream 검사는 실제 Kiro 클라우드 응답의 증거가 아닙니다. 알려진 계정 사용량 한도 때문에 실서비스 추론을 다시 요청하지 않습니다.
+
+[Windows Server 2022 전체 검증](https://github.com/emotionbug/kiro-cli-internal/actions/runs/40178277860)을 통과했습니다. 실제 배포 ZIP을 새 한글·공백 경로에 풀어 Python/Git Bash/rg/jq, 계정 결합 모델 목록, 기본 Full access의 실제 OMP 파일 쓰기, 30초 재시도 두 경로와 완료 도구 중복 실행 방지, Kiro 대행 검색·인용 전달, 사용량 조회, ConPTY TUI, 승인된 Chrome의 실제 화면, 전용 프로세스 종료 및 전체 파일 무결성을 확인했습니다. 브라우저는 비인증 첫 화면까지, 인증된 에이전트 동작·사용량은 CLI/SDK로 검증했습니다. 인증 후 브라우저 조작은 미검증입니다.
+
+[플러그인 CI](https://github.com/emotionbug/omp-kiro/actions/runs/40170019535)는 Node 22/24 검사와 실제 Bun 1.3.11의 승인 CA·잘못된 인증서/호스트명 거절·취소 경계를 통과했습니다. 배포 ZIP 옆의 `report.json`, `reconnect.json`, `startup.json`, `utilities.json`, `bundle-manifest.json`, `web-ui.png`에서 측정 범위를 확인할 수 있습니다. 운영 PC에서 외부 웹을 막는 브라우저 플래그를 실행하지 않으며, CI에서는 브라우저 자체의 백그라운드 요청을 별도 거부 프록시로 차단해 애플리케이션 요청과 구분했습니다.
+
+[릴리스 승격 워크플로](.github/workflows/publish-qualified-release.yml)는 성공한 main 브랜치 검증 실행만 받습니다. 인터넷 사용이 허용된 CI에서 기존 검증 ZIP을 내려받아 ZIP SHA-256, 모든 내부 파일의 크기·SHA-256, 외부 manifest와 내부 manifest의 일치를 확인합니다. 검증 소스 커밋에 태그를 묶고 업로드된 모든 Release 자산의 서버 digest까지 맞춘 뒤 draft를 공개합니다. ZIP을 다시 빌드하거나 기존 Release를 덮어쓰지 않습니다. 결과는 `release-verification.json`에 남깁니다.
 
 **Server 2019 / build 17763은 목표 환경이지 실행 검증 완료 환경이 아닙니다.** 최신 Windows CI 통과를 Server 2019 인증으로 표시하지 않으며 실제 회사 프록시의 인증·정책도 별도 현장 검증이 필요합니다. `server2019Verified: false`를 유지합니다.
 

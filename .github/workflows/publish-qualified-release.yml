@@ -1,0 +1,158 @@
+name: Publish qualified portable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualified_run_id:
+        description: Successful main-branch Portable Windows package run
+        required: true
+        default: "40178277860"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QUALIFIED_RUN_ID: ${{ inputs.qualified_run_id }}
+      BUNDLE_NAME: kiro-paseo-omp-http-0.4.0-windows-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - name: Bind successful qualification authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:QUALIFIED_RUN_ID -notmatch '^\d+$') { throw 'Invalid qualification run id' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:QUALIFIED_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read qualification authority' }
+          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
+              $run.path -ne '.github/workflows/portable-windows.yml' -or
+              $run.head_branch -ne 'main' -or $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) {
+            throw 'Only a successful owned main-branch portable qualification may be published'
+          }
+          if ($run.head_sha -notmatch '^[0-9a-f]{40}$') { throw 'Invalid qualified source identity' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:QUALIFIED_RUN_ID/artifacts" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read qualified artifact identity' }
+          $qualified = @($artifacts.artifacts | Where-Object { $_.name -eq 'portable-windows-qualified' -and -not $_.expired })
+          if ($qualified.Count -ne 1) { throw 'Exactly one retained qualified artifact is required' }
+          if ($qualified[0].digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'Qualified artifact digest missing' }
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "QUALIFIED_SOURCE_SHA=$($run.head_sha)`nQUALIFIED_ARTIFACT_DIGEST=$($qualified[0].digest)`n")
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-windows-qualified
+          run-id: ${{ inputs.qualified_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualified-release
+      - name: Verify every ZIP member and publish digest-matched assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'qualified-release'
+          $zipName = "$env:BUNDLE_NAME.zip"
+          $zipPath = Join-Path $root $zipName
+          $checksumPath = "$zipPath.sha256"
+          $manifestPath = Join-Path $root "$env:BUNDLE_NAME/bundle-manifest.json"
+          $reportRoot = Join-Path $root 'qualification'
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $report = Get-Content -LiteralPath (Join-Path $reportRoot 'report.json') -Raw | ConvertFrom-Json
+          if ($manifest.target -ne 'win32-x64' -or $manifest.archive.filename -ne $zipName -or
+              -not $manifest.proxy.validation.memory.budgetPassed -or $manifest.compatibility.server2019Verified -or
+              $report.result -ne 'passed' -or -not $report.privateFixturesRemoved -or
+              $report.cleanup.ownedStackProcessesRemaining -ne 0 -or
+              $report.applicationProxyViolations.count -ne 0 -or $report.webUi.blockedExternalPageRequests -ne 0) {
+            throw 'Qualification report or manifest does not satisfy the release contract'
+          }
+          $checksum = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
+          if ($checksum.Count -ne 2 -or $checksum[0] -notmatch '^[0-9a-f]{64}$' -or $checksum[1] -ne $zipName) {
+            throw 'Invalid qualified ZIP checksum record'
+          }
+          $zipSha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipSha -ne $checksum[0]) { throw 'Qualified ZIP SHA-256 mismatch' }
+          $expected = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+          foreach ($file in $manifest.files) {
+            if ($file.path -match '(^/|\\|(^|/)\.\.(/|$)|:)') { throw 'Unsafe manifest member path' }
+            if ($file.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Invalid member digest' }
+            $expected.Add($file.path, $file)
+          }
+          $expected.Add('bundle-manifest.json', [pscustomobject]@{
+            sha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            size = (Get-Item -LiteralPath $manifestPath).Length
+          })
+          $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          $hasher = [Security.Cryptography.SHA256]::Create()
+          $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          try {
+            if ($archive.Entries.Count -ne $expected.Count) { throw 'ZIP inventory count mismatch' }
+            foreach ($entry in $archive.Entries) {
+              if (-not $seen.Add($entry.FullName) -or -not $expected.ContainsKey($entry.FullName)) {
+                throw 'Unexpected or duplicate ZIP member'
+              }
+              $authority = $expected[$entry.FullName]
+              if ($entry.Length -ne $authority.size) { throw 'ZIP member size mismatch' }
+              $stream = $entry.Open()
+              try { $digest = [Convert]::ToHexString($hasher.ComputeHash($stream)).ToLowerInvariant() }
+              finally { $stream.Dispose() }
+              if ($digest -ne $authority.sha256) { throw 'ZIP member SHA-256 mismatch' }
+            }
+          } finally { $hasher.Dispose(); $archive.Dispose() }
+          $image = Join-Path $reportRoot 'web-ui.png'
+          if ((Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant() -ne $report.webUi.screenshotSHA256) {
+            throw 'Qualified browser evidence digest mismatch'
+          }
+          $verificationPath = Join-Path $root 'release-verification.json'
+          [ordered]@{
+            schemaVersion = 1
+            qualifiedRunId = $env:QUALIFIED_RUN_ID
+            qualifiedSourceSha = $env:QUALIFIED_SOURCE_SHA
+            qualifiedArtifactDigest = $env:QUALIFIED_ARTIFACT_DIGEST
+            archive = $zipName
+            archiveBytes = (Get-Item -LiteralPath $zipPath).Length
+            archiveSha256 = $zipSha
+            verifiedZipMembers = $seen.Count
+            verification = 'Streamed SHA-256 and size of every ZIP member, including exact external manifest bytes; no target execution'
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+          $assets = @($zipPath, $checksumPath, $manifestPath, $verificationPath,
+            (Join-Path $reportRoot 'report.json'), (Join-Path $reportRoot 'reconnect.json'),
+            (Join-Path $reportRoot 'startup.json'), (Join-Path $reportRoot 'utilities.json'), $image,
+            (Join-Path $env:GITHUB_WORKSPACE 'releases/0.4.0/kiro-web-search-observation.json'))
+          $assetDigests = @{}
+          foreach ($asset in $assets) {
+            $name = [IO.Path]::GetFileName($asset)
+            $assetDigests[$name] = if ($asset -eq $zipPath) { "sha256:$zipSha" } else {
+              'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          $notes = Get-Content -LiteralPath 'releases/0.4.0/RELEASE.md' -Raw
+          $notes += "`n## 배포 무결성`n- ZIP SHA-256: ``$zipSha```n- ZIP bytes: $((Get-Item -LiteralPath $zipPath).Length)`n- 내부 파일 $($seen.Count)개를 스트리밍 SHA-256으로 재검증했습니다.`n- 검증한 소스: ``$env:QUALIFIED_SOURCE_SHA```n- [Windows 전체 검증](https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:QUALIFIED_RUN_ID)`n"
+          $notesPath = Join-Path $root 'release-notes.md'
+          [IO.File]::WriteAllText($notesPath, $notes)
+          $tag = 'v0.4.0'
+          gh release create $tag @assets --draft --prerelease --target $env:QUALIFIED_SOURCE_SHA --title 'Paseo + OMP + Kiro HTTP 0.4.0 · Windows x64 portable' --notes-file $notesPath
+          if ($LASTEXITCODE -ne 0) { throw 'Release draft creation/upload failed; no existing release is overwritten' }
+          $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -ne 'commit' -or $tagRef.object.sha -ne $env:QUALIFIED_SOURCE_SHA) {
+            throw 'Release tag does not bind the qualified source commit'
+          }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.draft -or -not $release.prerelease -or $release.assets.Count -ne $assets.Count) {
+            throw 'Release draft asset contract mismatch'
+          }
+          foreach ($asset in $release.assets) {
+            if (-not $assetDigests.ContainsKey($asset.name) -or $asset.digest -ne $assetDigests[$asset.name]) {
+              throw 'Uploaded release asset digest mismatch; draft is not published'
+            }
+          }
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Verified draft publication failed' }
+          "Published $($release.html_url) with ZIP SHA-256 $zipSha and $($seen.Count) verified members." | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          Write-Output "Published $($release.html_url)"
+          Write-Output "ZIP_SHA256=$zipSha"
+          Write-Output "VERIFIED_ZIP_MEMBERS=$($seen.Count)"
