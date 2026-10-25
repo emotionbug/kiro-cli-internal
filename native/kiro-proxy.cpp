@@ -348,7 +348,17 @@ void duplex(SOCKET client, SOCKET upstream, BodyFrame* body = nullptr, ResponseF
     auto active = GetTickCount64();
     while (!stopping) {
         fd_set reads, writes; FD_ZERO(&reads); FD_ZERO(&writes); bool finished = true;
-        for (auto& f : flows) { if (!f.eof || f.begin < f.end) finished = false; if (!f.eof && f.end < f.bytes.size()) FD_SET(f.from, &reads); if (f.begin < f.end) FD_SET(f.to, &writes); else if (f.eof && !f.shut) { shutdown(f.to, SD_SEND); f.shut = true; } }
+        for (auto& f : flows) {
+            if (!f.eof || f.begin < f.end) finished = false;
+            if (!f.eof && f.end < f.bytes.size()) FD_SET(f.from, &reads);
+            if (f.begin < f.end) FD_SET(f.to, &writes);
+            else if (f.eof && !f.shut) {
+                // Framed request completion is not TCP EOF. Sending FIN here
+                // makes an HTTP proxy close a still-streaming response.
+                if (!(body && f.from == client && body->done())) shutdown(f.to, SD_SEND);
+                f.shut = true;
+            }
+        }
         if (finished) return; timeval wait{1, 0}; int rc = select(0, &reads, &writes, nullptr, &wait); if (rc < 0 || GetTickCount64() - active > 600000) return;
         for (auto& f : flows) {
             if (FD_ISSET(f.to, &writes)) { int n = send(f.to, f.bytes.data() + f.begin, static_cast<int>(f.end - f.begin), 0); if (n > 0) { f.begin += n; active = GetTickCount64(); if (f.begin == f.end) f.begin = f.end = 0; } else if (WSAGetLastError() != WSAEWOULDBLOCK) return; }
