@@ -30,6 +30,8 @@ doctor.cmd --verify-all
 
 `models.cmd`는 실제 계정의 모델 목록을 조회하고 계정에 결합된 `models.json`과 Paseo 카탈로그를 갱신합니다. OMP/직접 HTTP 시작은 이 실제 메타데이터 스냅샷을 사용하므로 목록 재조회에 실패했다고 선택한 모델이 사라지거나 다른 모델로 바뀌지 않습니다. 모델을 만들어 넣거나 생성 요청으로 추측하지 않습니다. 갱신한 목록은 새 세션 또는 OMP 재로드에 반영합니다. 로그인 계정이 달라지면 이전 목록을 지우고 다시 가져옵니다. 프로필 ARN이 없는 인증에서 refresh token이 회전한 경우에도 `models.cmd`로 결합을 갱신해야 합니다. 다른 CLI가 설치돼 있다는 이유만으로 Claude/Codex CLI가 OMP 모델로 추가되지는 않습니다.
 
+이 전용 패키지의 **새 OMP 설정**은 `kiro-http` 외 기본 제공자의 자동 모델 탐색을 끕니다. 외부 서비스/로컬 모델 서버의 목록 조회는 필요하지 않습니다. 고정 OMP 버전의 제공자 목록은 `app/omp-provider-roster.json`에 있으며 OMP 버전을 바꾸면 함께 검토해야 빌드됩니다. 기존 사용자 `omp/config.yml`은 덮어쓰지 않고, 다른 OMP 설치에는 적용하지 않습니다. 도구 선택이나 Python 사용을 제한하는 지침은 추가하지 않습니다.
+
 ### 폐쇄망의 웹 검색
 
 HTTP 경로의 기본 `web_search`는 별도 검색 API 키 없이 **같은 Kiro 인증으로 `runtime.<region>.kiro.dev/mcp`에 검색을 요청**합니다. 인터넷 검색은 Kiro 서버가 수행하며, PC는 반환된 출처 URL을 자동으로 열거나 본문을 다운로드하지 않습니다. Exa·Brave 등 외부 검색 서비스로 fallback하지 않습니다. OMP 경로와 선택형 Paseo 직접 HTTP 경로 모두 이 도구를 제공합니다.

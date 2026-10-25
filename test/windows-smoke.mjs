@@ -912,6 +912,7 @@ async function smoke() {
               "Offered write schema must declare path and content",
             );
             const input = { path: outputFile, content: fileText };
+            if (schema.properties.i) input.i = "Writing qualification fixture";
             if (schema.properties.ikey) input.ikey = "portable-smoke-write";
             for (const key of schema.required ?? [])
               assert.ok(key in input, "Write tool declares an unsupported required field");
@@ -972,7 +973,10 @@ async function smoke() {
             response.end(frame("toolUseEvent", {
               toolUseId: searchToolId,
               name: search.name,
-              input: JSON.stringify({ query: searchQuery }),
+              input: JSON.stringify({
+                query: searchQuery,
+                ...(search.inputSchema.json.properties.i ? { i: "Searching Kiro backend" } : {}),
+              }),
               stop: true,
             }));
             return;
@@ -1007,8 +1011,24 @@ async function smoke() {
             }),
           ]));
         } catch (error) {
-          fixtureFailure = error;
-          response.destroy();
+          if (!fixtureFailure) {
+            fixtureFailure = error;
+            report.fixtureProgress = {
+              generations, catalogs, searchRequests, requestSequence: [...requestSequence],
+              retryCadence: [...retryCadence], toolResultSeen, recoverySeen,
+              searchResultSeen, partialTextRetained,
+            };
+          }
+          if (!response.headersSent) {
+            // A broken fixture is terminal, not another transient network fault.
+            response.writeHead(400, {
+              "content-type": "application/x-amz-json-1.0",
+              "x-amzn-errortype": "ValidationException",
+            });
+            response.end(JSON.stringify({
+              __type: "ValidationException", message: "Controlled fixture invariant failed",
+            }));
+          } else response.destroy();
         }
       },
     );

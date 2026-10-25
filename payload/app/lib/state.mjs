@@ -282,10 +282,12 @@ export function ompArgs() {
 }
 export async function ensureOmpSettings(state) {
   const file = path.join(state.root, "omp/config.yml");
+  const { disabledProviders } = await json(path.join(bundleRoot, "app/omp-provider-roster.json"));
   try {
     await writeFile(
       file,
-      "startup:\n  checkUpdate: false\n  setupWizard: false\n  changelogMode: hidden\nmarketplace:\n  autoUpdate: 'off'\nretry:\n  enabled: false\n  modelFallback: false\n  fallbackChains: {}\n  waitForUsageReset: false\n",
+      "startup:\n  checkUpdate: false\n  setupWizard: false\n  changelogMode: hidden\nmarketplace:\n  autoUpdate: 'off'\nretry:\n  enabled: false\n  modelFallback: false\n  fallbackChains: {}\n  waitForUsageReset: false\n" +
+        `disabledProviders: ${JSON.stringify(disabledProviders)}\n`,
       { flag: "wx", mode: 0o600 },
     );
   } catch (error) {

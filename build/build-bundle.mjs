@@ -26,6 +26,11 @@ import { applyPaseoOmpStartupFix } from "./paseo-omp-startup.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "utf8"));
+const ompProviderRoster = JSON.parse(
+  await readFile(path.join(repo, "payload/app/omp-provider-roster.json"), "utf8"),
+);
+if (ompProviderRoster.ompVersion !== inputs.assets.omp.version)
+  throw new Error("Review the offline provider roster when changing the pinned OMP version.");
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   const flag = process.argv[i];
