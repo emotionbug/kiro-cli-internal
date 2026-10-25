@@ -1562,7 +1562,7 @@ async function smoke() {
         "--disable-features=OptimizationHints,MediaRouter",
         "--metrics-recording-only",
         "--password-store=basic",
-        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost",
+        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
         `--proxy-server=http://127.0.0.1:${proxyPort}`,
         "--proxy-bypass-list=127.0.0.1;localhost",
         `--remote-debugging-port=${browserPort}`,
@@ -1620,7 +1620,18 @@ async function smoke() {
       if (statuses && Number.isInteger(status) && status >= 100 && status < 600 &&
         !statuses.includes(status)) statuses.push(status);
     });
-    browserCdp.on("Network.loadingFailed", () => report.webUiDiagnostics.failedRequests++);
+    browserCdp.on("Network.loadingFailed", (event) => {
+      report.webUiDiagnostics.failedRequests++;
+      const known = [
+        "net::ERR_NAME_NOT_RESOLVED", "net::ERR_CONNECTION_REFUSED",
+        "net::ERR_BLOCKED_BY_CLIENT", "net::ERR_PROXY_CONNECTION_FAILED",
+        "net::ERR_TUNNEL_CONNECTION_FAILED", "net::ERR_CONNECTION_CLOSED",
+        "net::ERR_CONNECTION_RESET", "net::ERR_ABORTED",
+      ];
+      const kind = known.includes(event.errorText) ? event.errorText : "other";
+      const kinds = report.webUiDiagnostics.networkFailureKinds ??= [];
+      if (!kinds.includes(kind)) kinds.push(kind);
+    });
     browserCdp.on("Fetch.requestPaused", (event) => {
       const url = new URL(event.request.url);
       const allowed =
@@ -1645,7 +1656,8 @@ async function smoke() {
       patterns: [{ urlPattern: "*", requestStage: "Request" }],
     });
     report.webUiDiagnostics.stage = "navigation";
-    await browserCdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+    const navigation = await browserCdp.send("Page.navigate", { url: `${uiOrigin}/` });
+    assert.equal(Boolean(navigation.errorText), false, "Loopback browser navigation failed");
     let dom;
     report.webUiDiagnostics.stage = "render";
     await waitFor(
