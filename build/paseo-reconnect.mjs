@@ -8,7 +8,7 @@ import { brotliCompress, gzip, constants as zlibConstants } from "node:zlib";
 // This is a build-time source projection, not a live vendor-file hotpatch.
 export const PASEO_BROWSER_ASSET = "dist/server/web-ui/_expo/static/js/web/index-b635bff8218cfcb57983de05f96c16ba.js";
 export const PASEO_BROWSER_INPUT_SHA256 = "788d0c5e8fe47f2a7b3b24de78f1c6990fbacf250429d6eb221dac48ea44b645";
-export const PASEO_BROWSER_PATCHED_SHA256 = "935153995eaaeb01324fd370a56d54d9e2357003377ed54a8615708d8babc06e";
+export const PASEO_BROWSER_PATCHED_SHA256 = "bef319283eae815e33b8eed46ffbd9f65d032fb72f88eb48cf474c84330f355e";
 export const PASEO_BROWSER_PROJECTED_ASSET = `dist/server/web-ui/_expo/static/js/web/index-${PASEO_BROWSER_PATCHED_SHA256.slice(0, 32)}.js`;
 const original = 'catch(i){return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
 const projected = 'catch(i){if("unknown"===i?.outcome||"DAEMON_REQUEST_TIMEOUT"===i?.code)return{status:"failed",deliveryOutcome:"unknown",errorMessage:"Delivery outcome unknown. Reconnect and inspect the conversation before sending again."};return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
@@ -30,6 +30,10 @@ export function projectPaseoQueuedMessageRecovery(bytes) {
   for (const [before, after] of [
     [original, projected],
     ...reconnectBoundaries.map((before) => [before, before.replace("1500", "3e4")]),
+    // An advertised private daemon is authoritative even when it needs a password.
+    // Never fall through to an unrelated user's default localhost:6767 daemon.
+    ["if(t){if(await this.bootstrapInitialConnectionHint(t))return}await this.bootstrapDefaultLocalhost()",
+      "if(t){await this.bootstrapInitialConnectionHint(t);return}await this.bootstrapDefaultLocalhost()"],
   ]) {
     const index = source.indexOf(before);
     if (index < 0 || source.indexOf(before, index + before.length) >= 0) {
@@ -80,9 +84,10 @@ export async function applyPaseoReconnectFix(serverRoot) {
   await rm(asset);
   for (const { prior } of outputs) if (prior) await rm(prior);
   return {
-    projection: "paseo-0.13.0-fixed-30s-reconnect-and-unknown-delivery-no-replay",
+    projection: "paseo-0.13.0-fixed-30s-reconnect-unknown-delivery-no-replay-explicit-hint",
     reconnect: { baseDelayMs: PASEO_RECONNECT_PERIOD_MS, maxDelayMs: PASEO_RECONNECT_PERIOD_MS,
       attempts: "unlimited until closed; existing authentication/security stops retained" },
+    initialConnectionHint: "Authoritative advertised daemon; no fallback probe of unrelated localhost:6767 on password or connection failure",
     originalAsset: PASEO_BROWSER_ASSET,
     asset: PASEO_BROWSER_PROJECTED_ASSET,
     originalSha256: PASEO_BROWSER_INPUT_SHA256,

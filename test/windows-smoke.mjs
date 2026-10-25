@@ -1656,7 +1656,9 @@ async function smoke() {
     });
     browserCdp.on("Network.webSocketCreated", (event) => {
       const url = new URL(event.url);
-      if (url.protocol !== "ws:" || url.hostname !== "127.0.0.1" || url.port !== String(port))
+      if (url.protocol !== "ws:" ||
+        (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") ||
+        url.port !== String(port))
         uiViolations.push("non-loopback page WebSocket denied");
     });
     browserCdp.on("Fetch.requestPaused", (event) => {
@@ -1664,7 +1666,7 @@ async function smoke() {
       const allowed =
         ["data:", "blob:", "about:"].includes(url.protocol) ||
         (["http:", "ws:"].includes(url.protocol) &&
-          url.hostname === "127.0.0.1" &&
+          (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]") &&
           url.port === String(port));
       if (!allowed) uiViolations.push("non-loopback page request blocked");
       void browserCdp
