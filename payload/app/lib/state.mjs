@@ -218,6 +218,15 @@ export async function initialize(dataDir) {
 export function runtimeEnv(state, env = process.env) {
   const entries = Object.entries(env);
   const inheritedPath = entries.find(([key]) => /^path$/i.test(key))?.[1] ?? "";
+  const inheritedNoProxy = entries.find(([key]) => /^no_proxy$/i.test(key))?.[1] ?? "";
+  const noProxy = [
+    ...new Set(
+      `${inheritedNoProxy},localhost,127.0.0.1,::1,[::1]`
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ].join(",");
   const virtualEnv = entries.find(([key]) => /^virtual_env$/i.test(key))?.[1];
   const condaPrefix = entries.find(([key]) => /^conda_prefix$/i.test(key))?.[1];
   const activePython =
@@ -229,7 +238,7 @@ export function runtimeEnv(state, env = process.env) {
   const clean = Object.fromEntries(
     entries.filter(
       ([key]) =>
-        !/^(?:PATH$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_PROFILE$|OMP_KIRO_|OMP_INTERNAL_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$)/i.test(
+        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_PROFILE$|OMP_KIRO_|OMP_INTERNAL_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$)/i.test(
           key,
         ),
     ),
@@ -247,6 +256,8 @@ export function runtimeEnv(state, env = process.env) {
       inheritedPath,
     ].join(path.delimiter),
     PASEO_HOME: state.home,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
     NODE_OPTIONS: `--max-old-space-size=${state.config.nodeHeapMb}`,
     PI_CONFIG_DIR: path.join(state.root, "config"),
     PI_CODING_AGENT_DIR: path.join(state.root, "omp"),

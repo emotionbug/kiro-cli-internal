@@ -4,7 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { access, readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { access, readFile, mkdtemp, writeFile, rm, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -317,6 +317,30 @@ test("CA configuration rejects private keys before export and copies only canoni
       const exported = await readFile(proxy.env.NODE_EXTRA_CA_CERTS, "utf8");
       assert.match(exported, /-----BEGIN CERTIFICATE-----/);
       assert.doesNotMatch(exported, /PRIVATE KEY|private-comment|unknown-payload/);
+      const cache = proxy.env.NODE_EXTRA_CA_CERTS;
+      await chmod(cache, 0o400);
+      const server = https.createServer({ key, cert }, (_request, response) =>
+        response.end("cached-ca-verified"),
+      );
+      let reused;
+      try {
+        reused = await startProxy({
+          dataDir: dir,
+          config: { network: { mode: "direct", caFile: ca } },
+          env: {},
+        });
+        const port = await listen(server);
+        assert.equal(
+          await child(`console.log(await (await fetch('https://127.0.0.1:${port}/')).text())`, {
+            NODE_EXTRA_CA_CERTS: reused.env.NODE_EXTRA_CA_CERTS,
+          }),
+          "cached-ca-verified",
+        );
+      } finally {
+        await reused?.close();
+        if (server.listening) await stop(server);
+        await chmod(cache, 0o600);
+      }
     } finally {
       await proxy.close();
     }

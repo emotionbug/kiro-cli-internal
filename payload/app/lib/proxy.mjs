@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, readFile, mkdir, writeFile, open } from "node:fs/promises";
+import { access, readFile, mkdir, writeFile, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import http from "node:http";
@@ -118,7 +118,25 @@ export async function startProxy({ bundleRoot, dataDir, config = {}, env = proce
     const caDir = join(dataDir, "proxy");
     await mkdir(caDir, { recursive: true });
     const caPath = join(caDir, `trust-${createHash("sha256").update(pem).digest("hex")}.pem`);
-    await writeFile(caPath, pem, { mode: 0o600 });
+    const existing = await readFile(caPath, "utf8").catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing !== pem) {
+      const temporary = `${caPath}.${randomBytes(8).toString("hex")}.tmp`;
+      try {
+        await writeFile(temporary, pem, { flag: "wx", mode: 0o600 });
+        try {
+          await rename(temporary, caPath);
+        } catch (error) {
+          // Another launcher may publish the same content while Windows has it open.
+          const winner = await readFile(caPath, "utf8").catch(() => null);
+          if (winner !== pem) throw error;
+        }
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    }
     childEnv.NODE_EXTRA_CA_CERTS = caPath;
   }
   if (network.mode === "direct")
