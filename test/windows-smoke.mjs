@@ -1453,7 +1453,7 @@ async function smoke() {
       tuiExit;
     tui = pty.spawn(
       process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
-      ["/d", "/s", "/c", `""${path.join(bundle, "omp.cmd")}" --console --data-dir "${data}""`],
+      `/d /s /c ""${path.join(bundle, "omp.cmd")}" --console --data-dir "${data}""`,
       { name: "xterm-256color", cols: 100, rows: 30, cwd: workspace, env },
     );
     const tuiDone = new Promise((resolve) =>

@@ -2,7 +2,7 @@
 // not a model or Kiro cloud fixture. No user daemon or OMP process is selected.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,7 +17,8 @@ if (process.argv[2] === "--fixture") {
   process.once("SIGTERM", finish);
   process.stdin.once("end", finish);
   process.stdin.resume();
-  await writeFile(marker, JSON.stringify({ pid: process.pid }));
+  await writeFile(`${marker}.tmp`, JSON.stringify({ pid: process.pid }), { flag: "wx" });
+  await rename(`${marker}.tmp`, marker);
 } else {
   assert.equal(process.argv[2], "--app");
   assert.equal(process.argv.length, 4);
