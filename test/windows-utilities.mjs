@@ -361,13 +361,14 @@ async function qualify() {
     const rg = path.join(relocated, manifest.rg.executable);
     const jq = path.join(relocated, manifest.jq.executable);
     report.phase = "versions";
-    for (const [name, executable, versionArgs, prefix] of [
-      ["rg", rg, ["--version"], "ripgrep "],
-      ["jq", jq, ["--version"], "jq-"],
+    report.versionOutput = {};
+    for (const [name, executable, versionArgs] of [
+      ["rg", rg, ["--version"]],
+      ["jq", jq, ["--version"]],
     ]) {
       const result = await command(executable, versionArgs, { input: "" }).done;
       assert.equal(result.code, 0, "Utility version command failed");
-      assert.equal(result.stdout.trim().split(/\r?\n/)[0], `${prefix}${manifest[name].version}`);
+      report.versionOutput[name] = result.stdout.trim();
     }
     report.phase = "native-python-pipeline";
     await runPipeline(

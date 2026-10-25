@@ -507,7 +507,7 @@ async function network(state, rest) {
 }
 export async function main(argv = process.argv.slice(2)) {
   const { action, flags, rest } = argumentsFor(argv);
-  if (action === "help" || (action !== "auth" && rest.includes("--help"))) {
+  if (action === "help" || (!["auth", "omp", "paseo"].includes(action) && rest.includes("--help"))) {
     console.log(usage);
     return 0;
   }

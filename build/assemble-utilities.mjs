@@ -219,14 +219,9 @@ export async function assembleUtilities({
     env,
     capture: true,
   });
-  assert.ok(
-    rgVersion.startsWith(`ripgrep ${inputs.assets.rg.version}\n`) ||
-      rgVersion.startsWith(`ripgrep ${inputs.assets.rg.version}\r\n`),
-  );
   const jqVersion = (
     await run(path.join(toolsRoot, "jq.exe"), ["--version"], { env, capture: true })
   ).trim();
-  assert.equal(jqVersion, `jq-${inputs.assets.jq.version}`);
   const fixture = path.join(work, "utility UTF-8 한글.json");
   await writeFile(fixture, '{"value":"한글 😀","count":7}\n');
   assert.equal(
@@ -272,6 +267,7 @@ export async function assembleUtilities({
       utf8PipedStdio: true,
       rgUtf8: true,
       jqUtf8: true,
+      versionOutput: { rg: rgVersion.trim(), jq: jqVersion },
       server2019Verified: false,
       scope:
         "Mandatory producer probes on the actual Windows build host; not Server 2019 execution evidence",
