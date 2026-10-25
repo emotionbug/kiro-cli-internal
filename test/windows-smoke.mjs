@@ -4,7 +4,7 @@
 // daemon logs and workspace contents live in a temporary directory outside the ZIP.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
@@ -82,6 +82,8 @@ async function smoke() {
   const browserOwned = new Map();
   const tuiOwned = new Map();
   const violations = [];
+  const ompLogCheckpoint = new Map();
+  let ompLogCheckpointTaken = false;
   const models = [];
   let daemon,
     browser,
@@ -188,6 +190,37 @@ async function smoke() {
       options,
     );
   }
+  function privateTlsCodes(text) {
+    // Emit only known identifiers, never the surrounding private message.
+    return [
+      "KIRO_TLS_CA_INVALID",
+      "UNABLE_TO_GET_ISSUER_CERT",
+      "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "SELF_SIGNED_CERT_IN_CHAIN",
+      "CERT_UNTRUSTED",
+      "CERT_REJECTED",
+      "CERT_HAS_EXPIRED",
+      "CERT_NOT_YET_VALID",
+      "CERT_REVOKED",
+      "CERT_SIGNATURE_FAILURE",
+      "INVALID_CA",
+      "INVALID_PURPOSE",
+      "ERR_TLS_CERT_ALTNAME_INVALID",
+      "ERR_TLS_CERT_ALTNAME_FORMAT",
+      "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED",
+      "ERR_TLS_HANDSHAKE_TIMEOUT",
+      "ERR_SSL_TLSV1_ALERT_UNKNOWN_CA",
+      "ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE",
+      "ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+      "ERR_SSL_CERTIFICATE_VERIFY_FAILED",
+      "ERR_SSL_WRONG_VERSION_NUMBER",
+      "ERR_PROXY_CONNECTION_FAILED",
+      "ERR_TUNNEL_CONNECTION_FAILED",
+      "ERR_HTTP_PROXY_CONNECT",
+    ].filter((code) => new RegExp(`\\b${code}\\b`).test(text));
+  }
   function classifyPrivateOutput(text) {
     // Export only fixed whitelist classifications, never raw log fragments,
     // paths, credentials, headers or arguments from any child or private log.
@@ -200,11 +233,26 @@ async function smoke() {
       ["EACCES", /\bEACCES\b/],
       ["EADDRINUSE", /\bEADDRINUSE\b/],
       ["ECONNREFUSED", /\bECONNREFUSED\b/],
+      ["ECONNRESET", /\bECONNRESET\b/],
       ["ETIMEDOUT", /\bETIMEDOUT\b/],
       ["ABORT_ERR", /\bABORT_ERR\b/],
       [
+        "TLS_CA_CONFIGURATION_INVALID",
+        /\bKIRO_TLS_CA_INVALID\b|Kiro TLS CA configuration is unreadable or malformed/i,
+      ],
+      [
+        "TLS_HOSTNAME_MISMATCH",
+        /ERR_TLS_CERT_ALTNAME_(?:INVALID|FORMAT)|hostname.{0,60}(?:mismatch|does not match)|certificate.{0,60}(?:hostname mismatch|not valid for)/i,
+      ],
+      [
+        "TLS_TRUST_CHAIN_REJECTED",
+        /UNABLE_TO_(?:GET_ISSUER_CERT(?:_LOCALLY)?|VERIFY_LEAF_SIGNATURE)|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|CERT_UNTRUSTED|CERT_AUTHORITY_INVALID|unknown ca|unable to get (?:local )?issuer certificate/i,
+      ],
+      ["TLS_CERTIFICATE_EXPIRED", /CERT_HAS_EXPIRED|certificate has expired/i],
+      ["TLS_CERTIFICATE_NOT_YET_VALID", /CERT_NOT_YET_VALID|certificate is not yet valid/i],
+      [
         "TLS_CERTIFICATE_REJECTED",
-        /CERT_(?:AUTHORITY_INVALID|HAS_EXPIRED)|SELF_SIGNED_CERT|UNABLE_TO_VERIFY|unable to verify|certificate verify failed|self.signed certificate/i,
+        /CERT_(?:AUTHORITY_INVALID|HAS_EXPIRED|NOT_YET_VALID|UNTRUSTED|REJECTED|REVOKED|SIGNATURE_FAILURE)|SELF_SIGNED_CERT|UNABLE_TO_(?:VERIFY|GET_ISSUER_CERT)|unable to verify|certificate verify failed|self.signed certificate/i,
       ],
       [
         "TLS_HANDSHAKE_FAILED",
@@ -241,7 +289,7 @@ async function smoke() {
         "CONFIGURATION_REJECTED",
         /invalid config|configuration.{0,40}(?:invalid|error)|schema validation|ZodError/i,
       ],
-      ["PROXY_FAILURE", /proxy.{0,40}(?:failed|error|refused)|WinHTTP.{0,40}(?:failed|error)/i],
+      ["PROXY_FAILURE", /ERR_(?:PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|HTTP_PROXY_CONNECT)|proxy.{0,40}(?:failed|error|refused)|WinHTTP.{0,40}(?:failed|error)/i],
       ["AUTH_REQUIRED", /\bAUTH_REQUIRED\b|Password required|not logged in/i],
       ["AUTH_FAILED", /\bAUTH_FAILED\b|Incorrect password/i],
       ["DAEMON_UNREACHABLE", /\bDAEMON_UNREACHABLE\b|Cannot connect to daemon/i],
@@ -272,6 +320,7 @@ async function smoke() {
       command: label,
       exitCode: result.code,
       classifications: classifyPrivateOutput(text),
+      tlsAndProxyCodes: privateTlsCodes(text),
       operationTokens: ["spawn", "open", "stat", "lstat", "mkdir", "realpath"].filter(
         (operation) => new RegExp(`\\b${operation}\\b`, "i").test(text),
       ),
@@ -287,15 +336,22 @@ async function smoke() {
       unpinnedOmpSpawn: /\bspawn\s+omp(?:\.exe)?\s+ENOENT\b/i.test(text),
     });
   }
-  async function recordOwnedOmpLogFailures() {
+  async function recordOwnedOmpLogFailures(checkpoint = false) {
     const roots = [
       ["private-config", path.join(data, "config/logs")],
       ["private-agent", path.join(data, "omp/logs")],
     ];
-    report.ompLogFailures = [];
+    if (!checkpoint) {
+      report.ompLogFailureScope = ompLogCheckpointTaken
+        ? "Only bytes appended after the actual-agent launch checkpoint; shared logs are not proof of session attribution"
+        : "Not collected: no actual-agent launch checkpoint; earlier discovery includes an intentional untrusted-TLS failure";
+      report.ompLogFailures = [];
+      if (!ompLogCheckpointTaken) return;
+    }
     for (const [role, root] of roots) {
       const counts = { role, filesRead: 0, bytesRead: 0, truncatedFiles: 0, unreadableEntries: 0 };
       const classifications = new Set();
+      const tlsAndProxyCodes = new Set();
       async function visit(directory) {
         let entries;
         try {
@@ -323,15 +379,24 @@ async function smoke() {
           let handle;
           try {
             handle = await open(file, "r");
-            const size = (await handle.stat()).size;
-            const length = Math.min(size, 4 * 1024 * 1024);
+            const { size, birthtimeMs } = await handle.stat();
+            if (checkpoint) {
+              ompLogCheckpoint.set(file, { size, birthtimeMs });
+              continue;
+            }
+            const prior = ompLogCheckpoint.get(file);
+            const start = prior?.birthtimeMs === birthtimeMs && size >= prior.size ? prior.size : 0;
+            const length = Math.min(size - start, 4 * 1024 * 1024);
+            if (!length) continue;
             const bytes = Buffer.alloc(length);
-            const { bytesRead } = await handle.read(bytes, 0, length, Math.max(0, size - length));
+            const { bytesRead } = await handle.read(bytes, 0, length, Math.max(start, size - length));
             counts.filesRead++;
             counts.bytesRead += bytesRead;
-            if (size > length) counts.truncatedFiles++;
-            for (const value of classifyPrivateOutput(bytes.subarray(0, bytesRead).toString("utf8")))
+            if (size - start > length) counts.truncatedFiles++;
+            const text = bytes.subarray(0, bytesRead).toString("utf8");
+            for (const value of classifyPrivateOutput(text))
               if (value !== "UNCLASSIFIED_PRIVATE_OUTPUT") classifications.add(value);
+            for (const code of privateTlsCodes(text)) tlsAndProxyCodes.add(code);
           } catch {
             counts.unreadableEntries++;
           } finally {
@@ -340,10 +405,51 @@ async function smoke() {
         }
       }
       await visit(root);
-      report.ompLogFailures.push({
-        ...counts,
-        classifications: [...classifications].sort(),
-      });
+      if (!checkpoint)
+        report.ompLogFailures.push({
+          ...counts,
+          classifications: [...classifications].sort(),
+          tlsAndProxyCodes: [...tlsAndProxyCodes].sort(),
+        });
+    }
+    if (checkpoint) ompLogCheckpointTaken = true;
+  }
+  async function recordPublishedCaBundles(approvedCa) {
+    // This inspects only the owned wrapper's immutable exports. It does not
+    // pretend that file presence proves a running OMP inherited or loaded it.
+    const observation = (report.approvedCaBundle = {
+      scope: "Owned wrapper-exported CA files; not a child environment or trust-store observation",
+      actualOmpEnvironment: "Not exposed by the public process/session inspection used by this fixture",
+      candidateFiles: 0,
+      readableFiles: 0,
+      contentAddressMatches: 0,
+      includesApprovedCa: 0,
+      privateKeyFiles: 0,
+      inspectionFailed: false,
+    });
+    try {
+      const approved = new X509Certificate(await readFile(approvedCa));
+      const root = path.join(data, "proxy");
+      for (const entry of await readdir(root, { withFileTypes: true })) {
+        if (!entry.isFile() || entry.isSymbolicLink() || !/^trust-[a-f0-9]{64}\.pem$/.test(entry.name))
+          continue;
+        observation.candidateFiles++;
+        const file = path.join(root, entry.name);
+        if ((await lstat(file)).size > 4 * 1024 * 1024) {
+          observation.inspectionFailed = true;
+          continue;
+        }
+        const pem = await readFile(file, "utf8");
+        observation.readableFiles++;
+        if (entry.name === `trust-${createHash("sha256").update(pem).digest("hex")}.pem`)
+          observation.contentAddressMatches++;
+        if (/-----BEGIN [^-\r\n]*PRIVATE KEY-----/i.test(pem)) observation.privateKeyFiles++;
+        const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+        if (blocks.some((block) => new X509Certificate(block).raw.equals(approved.raw)))
+          observation.includesApprovedCa++;
+      }
+    } catch {
+      observation.inspectionFailed = true;
     }
   }
   async function checked(job, label) {
@@ -593,6 +699,30 @@ async function smoke() {
       assert.equal(results.length, 1, "A completed tool result must occur exactly once in history");
       assert.equal(results[0].status, "success", "Actual OMP tool result was not successful");
       return results[0];
+    }
+    const connections = (report.connectionObservations = {
+      scope: "Fixture-side observations grouped by operation window, not proof of client environment or TLS trust loading",
+      phases: {},
+    });
+    function connectionPhase(name) {
+      return (connections.phases[name] = {
+        connectRequests: { management: 0, runtime: 0 },
+        rejectedProxyRequests: 0,
+        completedTlsHandshakes: { management: 0, runtime: 0, other: 0 },
+        tlsClientErrors: 0,
+        serverTlsClassifications: [],
+        serverTlsAndProxyCodes: [],
+        tunnelSocketErrors: 0,
+      });
+    }
+    let currentConnections = connectionPhase("initialSetup");
+    const socketConnections = new Map();
+    function serviceRole(servername) {
+      return servername === "management.us-east-1.kiro.dev"
+        ? "management"
+        : servername === "runtime.us-east-1.kiro.dev"
+          ? "runtime"
+          : "other";
     }
     const tlsServer = https.createServer(
       { key: await readFile(leafKey), cert: await readFile(leaf) },
@@ -879,21 +1009,43 @@ async function smoke() {
         }
       },
     );
+    tlsServer.on("connection", (socket) => socketConnections.set(socket.remotePort, currentConnections));
+    tlsServer.on("secureConnection", (socket) => {
+      const window = socketConnections.get(socket.remotePort) ?? currentConnections;
+      window.completedTlsHandshakes[serviceRole(socket.servername)]++;
+    });
+    tlsServer.on("tlsClientError", (error, socket) => {
+      const window = socketConnections.get(socket.remotePort) ?? currentConnections;
+      window.tlsClientErrors++;
+      const text = `${error?.code ?? ""}\n${error?.message ?? ""}`;
+      window.serverTlsClassifications = [...new Set([
+        ...window.serverTlsClassifications,
+        ...classifyPrivateOutput(text).filter((value) => /^(?:TLS_|ECONNRESET$)/.test(value)),
+      ])].sort();
+      window.serverTlsAndProxyCodes = [...new Set([
+        ...window.serverTlsAndProxyCodes,
+        ...privateTlsCodes(text),
+      ])].sort();
+    });
     const tlsPort = await listen(tlsServer);
     const connects = new Map();
     const proxyServer = http.createServer((_request, response) => {
+      currentConnections.rejectedProxyRequests++;
       violations.push("non-CONNECT proxy request");
       response.writeHead(403).end();
     });
     proxyServer.on("connect", (request, client, head) => {
+      const window = currentConnections;
       const allowed = /^(runtime|management)\.us-east-1\.kiro\.dev:443$/;
       if (!allowed.test(request.url)) {
+        window.rejectedProxyRequests++;
         violations.push("unapproved CONNECT target");
         client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
         return;
       }
       const host = request.url.split(":")[0];
       connects.set(host, (connects.get(host) ?? 0) + 1);
+      window.connectRequests[serviceRole(host)]++;
       // Never resolve the original hostname. The only outbound socket is loopback.
       const upstream = net.connect(tlsPort, "127.0.0.1");
       sockets.add(upstream);
@@ -904,8 +1056,14 @@ async function smoke() {
         client.pipe(upstream);
         upstream.pipe(client);
       });
-      upstream.on("error", () => client.destroy());
-      client.on("error", () => upstream.destroy());
+      upstream.on("error", () => {
+        window.tunnelSocketErrors++;
+        client.destroy();
+      });
+      client.on("error", () => {
+        window.tunnelSocketErrors++;
+        upstream.destroy();
+      });
       client.on("close", () => upstream.destroy());
       upstream.on("close", () => client.destroy());
     });
@@ -955,7 +1113,13 @@ async function smoke() {
       "Actual plugin saveKiroAuth",
     );
     report.phase = "real model discovery through strict TLS proxy";
+    currentConnections = connectionPhase("untrustedDiscovery");
     const untrusted = await cmd("models", ["--data-dir", data]).done;
+    const untrustedOutput = `${untrusted.stdout}\n${untrusted.stderr}`;
+    report.expectedUntrustedDiscovery = {
+      classifications: classifyPrivateOutput(untrustedOutput),
+      tlsAndProxyCodes: privateTlsCodes(untrustedOutput),
+    };
     assert.notEqual(
       untrusted.code,
       0,
@@ -975,7 +1139,9 @@ async function smoke() {
       ]),
       "Root network.cmd with public extra CA",
     );
+    currentConnections = connectionPhase("approvedManagement");
     await checked(cmd("models", ["--data-dir", data]), "Root models.cmd");
+    await recordPublishedCaBundles(ca);
     const directQuota = JSON.parse(
       await checked(cmd("usage", ["--data-dir", data]), "Root usage.cmd"),
     );
@@ -1050,6 +1216,8 @@ async function smoke() {
       "Readiness must correspond to the wrapper-owned daemon",
     );
     await sample("daemon ready before agent", daemon.child.pid);
+    await recordOwnedOmpLogFailures(true);
+    currentConnections = connectionPhase("actualAgent");
     report.phase = "actual Paseo OMP recovery, completed-tool replay protection and Kiro search";
     const prompt =
       `${promptMarker}: Execute the tools requested by the model to create the fixture file ` +
@@ -1103,6 +1271,7 @@ async function smoke() {
       recordCommandFailure("Actual agent returned non-completed status", failureTranscript);
     }
     assert.equal(cliResult.status, "completed", "Actual Paseo CLI agent did not complete");
+    currentConnections = connectionPhase("remainingAcceptance");
     assert.equal(
       catalogs,
       catalogsBeforeColdStart,

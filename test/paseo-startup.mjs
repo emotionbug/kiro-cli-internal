@@ -104,7 +104,7 @@ if (process.argv[2] === "--fixture") {
     for (const controller of controllers) controller.abort();
     for (const session of sessions) await session.close().catch(() => {});
     for (const pid of observedPids) await exited(pid);
-    await rm(scratch, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true, maxRetries: 8, retryDelay: 500 });
   }
   console.log(JSON.stringify(report, null, 2));
 }

@@ -97,7 +97,7 @@ HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호
 
 ### 구성·재현·검증 한계
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.3을 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.4를 고정합니다. npm 의존성 설치·네이티브 바이너리 빌드·배포 파일 다운로드는 **인터넷 사용이 허용된 빌드 PC에서** 완료합니다. 대상 PC에 npm이나 네이티브 컴파일러를 설치할 필요는 없습니다. 기동 시 Paseo가 동봉된 esbuild로 플러그인을 로컬 변환하는 과정은 남아 있습니다.
 
 ```powershell
 # Windows x64 MSVC Developer Command 환경에서
