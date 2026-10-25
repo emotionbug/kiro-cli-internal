@@ -46,6 +46,8 @@ Paseo 웹 연결도 첫 시도부터 30초 주기로 재접속합니다. 프롬�
 
 기본 도구 정책은 사용자가 선택한 **Full access**입니다. Paseo의 OMP/직접 HTTP 새 세션과 독립 OMP는 파일 수정·삭제·명령 실행 때 건별 승인을 묻지 않습니다. 최초 플러그인 신뢰·로그인은 별도이며 직접 선택한 Ask/Plan은 유지합니다. 독립 OMP 확인 모드: `omp.cmd --console -- --approval-mode always-ask`.
 
+실행 프로세스의 HOME/USERPROFILE은 전용 데이터 폴더이며 OMP 설정 루트는 그 아래 상대 이름 `config`입니다. 다른 드라이브의 절대 경로를 홈에 잘못 결합하지 않습니다. 작업 폴더는 유지하며 기존 홈의 Git/SSH 설정은 자동 복사하지 않습니다. 필요하면 해당 도구의 명시적 설정(`GIT_CONFIG_GLOBAL` 등)을 지정하세요.
+
 ## 동봉 유틸리티
 
 Python 3.13.12(`runtime\python\python.exe`, 같은 바이너리의 `python3.exe`), ripgrep 15.1.0(`runtime\tools\rg.exe`), jq 1.8.1(`runtime\tools\jq.exe`) 및 Git Bash 도구를 포함합니다. 런처가 시작한 도구에만 PATH를 적용하며 시스템 설정은 변경하지 않습니다. 활성 프로젝트 virtualenv/Conda는 동봉 Python보다 우선합니다.

@@ -81,6 +81,8 @@ HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호
 
 사용자 데이터 기본 경로는 `%LOCALAPPDATA%\KiroInternal`이며 인증 SQLite·Paseo/OMP 상태·목록·설정이 ZIP 밖에 저장됩니다. 사용자와 SYSTEM만 허용하는 ACL을 생성합니다. 공용 폴더나 다른 프로그램의 비어 있지 않은 데이터 폴더를 가져오지 않습니다. 별도 사용은 각 명령에 `--data-dir 절대경로`를 일관되게 지정합니다. `auth.cmd logout`은 이 HTTP 저장소만 로그아웃합니다.
 
+실행기가 시작한 프로세스의 `HOME`/`USERPROFILE`도 전용 데이터 폴더로 격리합니다. OMP의 `PI_CONFIG_DIR`는 home-relative 이름 `config`를 사용하므로, 다른 드라이브의 절대 데이터 경로를 홈 경로에 잘못 결합하여 `mkdir ENOENT`가 나는 경우를 피합니다. 프로젝트 작업 폴더는 유지하지만 기존 홈의 Git/SSH 설정을 자동 복사하지는 않습니다. 필요한 기존 설정은 `GIT_CONFIG_GLOBAL` 등 해당 도구의 명시적 설정으로 지정하세요.
+
 동봉 `omp-kiro`는 **비공식 Kiro HTTP/OAuth 구현**입니다. 서비스 변경·계정 정책의 영향을 받습니다. 계정 승인은 사용자 본인이 해야 하며, 설치 과정에서 기존 CLI 인증 DB를 자동 추출하지 않습니다. 플러그인은 비샌드박스 코드이고 도구가 사용자 권한으로 파일·명령을 실행할 수 있습니다. 회사의 프록시·AppLocker/WDAC·코드 서명·서비스 이용 정책 승인이 우선입니다.
 
 **사용자가 선택한 기본값은 Full access입니다.** Paseo의 OMP/직접 HTTP 새 세션과 독립 OMP는 파일 수정·삭제·명령 실행을 건별 승인 없이 사용자 권한으로 수행합니다. 최초 플러그인 신뢰 확인·로그인은 별도이며, 명시적으로 선택한 Ask/Plan은 유지합니다. OMP를 직접 실행할 때는 `omp.cmd --console -- --approval-mode always-ask`로 확인 모드를 선택할 수 있습니다.

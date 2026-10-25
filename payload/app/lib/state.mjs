@@ -238,7 +238,7 @@ export function runtimeEnv(state, env = process.env) {
   const clean = Object.fromEntries(
     entries.filter(
       ([key]) =>
-        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_PROFILE$|OMP_KIRO_|OMP_INTERNAL_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$)/i.test(
+        !/^(?:PATH$|NO_PROXY$|HOME$|USERPROFILE$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_PROFILE$|OMP_KIRO_|OMP_INTERNAL_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$)/i.test(
           key,
         ),
     ),
@@ -256,11 +256,13 @@ export function runtimeEnv(state, env = process.env) {
       path.join(bundleRoot, "runtime/git/usr/bin"),
       ...(!activePython ? [inheritedPath] : []),
     ].join(path.delimiter),
+    HOME: state.root,
+    USERPROFILE: state.root,
     PASEO_HOME: state.home,
     NO_PROXY: noProxy,
     no_proxy: noProxy,
     NODE_OPTIONS: `--max-old-space-size=${state.config.nodeHeapMb}`,
-    PI_CONFIG_DIR: path.join(state.root, "config"),
+    PI_CONFIG_DIR: "config",
     PI_CODING_AGENT_DIR: path.join(state.root, "omp"),
     OMP_KIRO_TRANSPORT: "http",
     OMP_KIRO_AUTH_FILE: state.authFile,
@@ -391,7 +393,9 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
       OMP_KIRO_AUTH_FILE: state.authFile,
       OMP_KIRO_TRANSPORT: "http",
       NODE_OPTIONS: "",
-      PI_CONFIG_DIR: path.join(state.root, "config"),
+      HOME: state.root,
+      USERPROFILE: state.root,
+      PI_CONFIG_DIR: "config",
       PI_CODING_AGENT_DIR: path.join(state.root, "omp"),
     },
     models,

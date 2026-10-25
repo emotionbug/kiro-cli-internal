@@ -230,6 +230,17 @@ async function qualify() {
       job.child.stdin.end("continue\n");
       report.commandStage = "run-python-stdlib-pipeline";
       const result = await job.done;
+      report.commandStage = "python-process-exit";
+      report.utilityExitCode = result.code;
+      if (result.code !== 0) {
+        report.pythonExceptionKinds = [
+          "AssertionError", "FileNotFoundError", "ModuleNotFoundError", "UnicodeDecodeError",
+          "UnicodeEncodeError", "CalledProcessError", "TimeoutExpired", "SSLError",
+        ].filter((kind) => new RegExp(`\\b${kind}\\b`).test(result.stderr));
+        report.pythonFixtureLines = [...result.stderr.matchAll(/File "([^"]+)", line (\d+)/g)]
+          .filter(([, file]) => path.basename(file) === "stdlib pipeline 한글.py")
+          .map(([, , line]) => Number(line));
+      }
       assert.equal(result.code, 0, "Actual utility pipeline failed");
       assert.equal(result.stderr, "", "Utility pipeline emitted unexpected diagnostics");
       const lines = result.stdout
@@ -350,6 +361,8 @@ async function qualify() {
         LOCALAPPDATA: home,
         // No user PATH, Python installation, registry selection, profile or toolchain.
         PATH: path.join(systemRoot, "System32"),
+        PYTHONPATH: workspace,
+        PYTHONHOME: path.join(workspace, "not-a-python-installation"),
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: path.join(home, "absent-gitconfig"),
         BASH_ENV: "",
@@ -360,6 +373,7 @@ async function qualify() {
     );
     const script = path.join(workspace, "stdlib pipeline 한글.py");
     await writeFile(script, pythonFixture(), "utf8");
+    await writeFile(path.join(workspace, "kiro_utility_foreign.py"), "raise RuntimeError('unexpected project import')\n");
     assert.ok(rootCertificates.length > 0, "Bundled Node must provide a public CA fixture");
     const publicCa = path.join(workspace, "공개 인증서 CA.pem");
     await writeFile(publicCa, rootCertificates[0], "ascii");
@@ -496,8 +510,7 @@ if len(sys.argv) > 5:
 assert Path(shutil.which("python")).samefile(expected_python)
 assert Path(shutil.which("rg")).samefile(expected_rg)
 assert Path(shutil.which("jq")).samefile(expected_jq)
-assert sys.flags.isolated == 1 and sys.flags.ignore_environment == 1 and sys.flags.no_user_site == 1
-assert all(Path(entry).resolve() != Path.cwd().resolve() for entry in sys.path if entry)
+assert importlib.util.find_spec("kiro_utility_foreign") is None
 assert sys.stdin.encoding.lower().replace("_", "-") == "utf-8"
 assert sys.stdout.encoding.lower().replace("_", "-") == "utf-8"
 assert sys.stderr.encoding.lower().replace("_", "-") == "utf-8"
@@ -530,7 +543,8 @@ matches = [json.loads(line)["data"] for line in search.stdout.splitlines() if js
 assert len(matches) == 1
 match = matches[0]
 assert (root / match["path"]["text"]).samefile(source)
-assert match["line_number"] == 2 and match["lines"]["text"] == needle + "\n"
+assert match["line_number"] == 2
+assert [part["match"]["text"] for part in match["submatches"]] == [needle]
 document = {"rows": [{"label": needle, "count": row[1]}], "matches": [{"line": match["line_number"], "text": needle}], "sqlite": row[0]}
 json_file = root / "구조화된 결과 데이터.json"
 json_file.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
