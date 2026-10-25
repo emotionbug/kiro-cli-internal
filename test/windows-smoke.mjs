@@ -116,8 +116,11 @@ async function smoke() {
     ],
   };
   const expectedGenerations = 5;
+  const callerHome = path.join(scratch, "original caller 홈");
   const env = {
-    ...process.env,
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(HOME|USERPROFILE)$/i.test(key))),
+    HOME: callerHome,
+    USERPROFILE: callerHome,
     NODE_OPTIONS: "",
     NODE_TLS_REJECT_UNAUTHORIZED: "1",
     NO_PROXY: "",
@@ -1098,9 +1101,11 @@ async function smoke() {
       ]),
       "Root network.cmd without extra CA",
     );
-    const authCode = `import { saveKiroAuth } from ${JSON.stringify(pathToFileURL(path.join(plugin, "server/auth.mjs")).href)}; let raw=''; for await (const b of process.stdin) raw+=b; await saveKiroAuth(JSON.parse(raw), {authFile:process.argv[1]});`;
+    const sourceDatabase = path.join(callerHome, ".local/share/kiro-cli/data.sqlite3");
+    await mkdir(path.dirname(sourceDatabase), { recursive: true });
+    const authCode = `import { DatabaseSync } from 'node:sqlite'; let raw=''; for await (const b of process.stdin) raw+=b; const db=new DatabaseSync(process.argv[1]); try { db.exec('CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); db.prepare('INSERT INTO auth_kv (key,value) VALUES (?,?)').run('kirocli:social:token',raw); } finally { db.close(); }`;
     await checked(
-      launch(node, ["--input-type=module", "-e", authCode, path.join(data, "auth.sqlite3")], {
+      launch(node, ["--input-type=module", "-e", authCode, sourceDatabase], {
         stdin: JSON.stringify({
           kind: "social",
           provider: "google",
@@ -1110,8 +1115,24 @@ async function smoke() {
           profile_arn: "arn:aws:codewhisperer:us-east-1:000000000000:profile/portable-fixture",
         }),
       }),
-      "Actual plugin saveKiroAuth",
+      "Controlled original-home CLI authentication database",
     );
+    const sourceHash = createHash("sha256").update(await readFile(sourceDatabase)).digest("hex");
+    await checked(
+      cmd("auth", ["--data-dir", data, "import-cli"]),
+      "Root auth.cmd import-cli from original caller home",
+    );
+    assert.equal(
+      createHash("sha256").update(await readFile(sourceDatabase)).digest("hex"),
+      sourceHash,
+      "Import modified the source CLI credential database",
+    );
+    report.cliAuthImport = {
+      source: "original caller home, not isolated OMP home",
+      explicitDatabaseArgument: false,
+      sourceDatabaseUnchanged: true,
+      destination: "private managed store used by the subsequent real OMP chain",
+    };
     report.phase = "real model discovery through strict TLS proxy";
     currentConnections = connectionPhase("untrustedDiscovery");
     const untrusted = await cmd("models", ["--data-dir", data]).done;

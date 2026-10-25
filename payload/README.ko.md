@@ -32,6 +32,8 @@ network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem
 
 Identity Center는 `auth.cmd login --provider identity-center --start-url 조직의_START_URL`을 사용합니다. Google/GitHub는 필요시 `--flow loopback` 또는 `--flow manual`도 지원합니다. 비밀번호·토큰을 명령행에 넣지 마세요. 네트워크 변경 전에는 이 데몬을 중지합니다.
 
+기존 CLI의 social 로그인은 선택적으로 `auth.cmd import-cli`로 가져올 수 있습니다. 기본 원본은 격리된 OMP 홈이 아닌 **호출 사용자의 원래 홈** 아래 `.local\share\kiro-cli\data.sqlite3`입니다. 다른 위치는 `--database C:\Path\data.sqlite3`로 지정합니다. 원본 DB는 읽기 전용이지만 refresh token 회전·폐기는 원래 세션과 공유할 수 있으므로 독립적인 `auth.cmd login`을 권장합니다.
+
 `models.cmd`는 계정에 결합된 실제 모델 스냅샷을 갱신합니다. OMP/직접 HTTP 시작은 이 스냅샷을 사용하며 임의 모델·다른 계정의 캐시로 fallback하지 않습니다. 새 세션 또는 OMP 재로드로 갱신한 목록을 반영합니다. 계정 변경은 이전 목록을 무효화합니다. 프로필 ARN이 없는 인증의 refresh token 회전도 `models.cmd`로 결합을 다시 갱신해야 합니다.
 
 ## Kiro 서버 대행 웹 검색

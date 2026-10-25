@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -552,8 +553,13 @@ export async function main(argv = process.argv.slice(2)) {
       throw new Error(
         "Use --data-dir to choose the shared authentication store; --auth-file cannot split OMP/Paseo stores.",
       );
-    const args = ["status", "logout", "import-cli"].includes(rest[0]) ? ["auth", ...rest] : rest;
+    let args = ["status", "logout", "import-cli"].includes(rest[0]) ? ["auth", ...rest] : rest;
     const operation = authOperation(args);
+    if (
+      operation === "auth import-cli" &&
+      !args.some((value) => value === "--database" || value.startsWith("--database="))
+    )
+      args = [...args, "--database", path.join(homedir(), ".local/share/kiro-cli/data.sqlite3")];
     const perform = async (env) => {
       const code = await child(node, [path.join(pluginRoot, "auth-cli.mjs"), ...args], env, {
         relaySignals: true,

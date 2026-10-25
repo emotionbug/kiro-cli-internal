@@ -26,6 +26,8 @@ usage.cmd
 doctor.cmd --verify-all
 ```
 
+선택적으로 `auth.cmd import-cli`로 기존 CLI의 social 로그인을 읽기 전용으로 가져올 수 있습니다. 기본 원본은 **호출한 사용자의 원래 홈** 아래 `.local\share\kiro-cli\data.sqlite3`이며, 격리된 OMP 홈이 아닙니다. 다른 위치는 `auth.cmd import-cli --database C:\Path\data.sqlite3`로 지정합니다. 원본 DB는 변경하지 않지만 refresh token의 회전·폐기는 원래 세션과 공유할 수 있으므로 독립적인 `auth.cmd login`을 권장합니다.
+
 `models.cmd`는 실제 계정의 모델 목록을 조회하고 계정에 결합된 `models.json`과 Paseo 카탈로그를 갱신합니다. OMP/직접 HTTP 시작은 이 실제 메타데이터 스냅샷을 사용하므로 목록 재조회에 실패했다고 선택한 모델이 사라지거나 다른 모델로 바뀌지 않습니다. 모델을 만들어 넣거나 생성 요청으로 추측하지 않습니다. 갱신한 목록은 새 세션 또는 OMP 재로드에 반영합니다. 로그인 계정이 달라지면 이전 목록을 지우고 다시 가져옵니다. 프로필 ARN이 없는 인증에서 refresh token이 회전한 경우에도 `models.cmd`로 결합을 갱신해야 합니다. 다른 CLI가 설치돼 있다는 이유만으로 Claude/Codex CLI가 OMP 모델로 추가되지는 않습니다.
 
 ### 폐쇄망의 웹 검색
