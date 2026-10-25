@@ -179,7 +179,7 @@ async function smoke() {
     });
     // A foreground launcher may exit before its first awaited readiness probe.
     done.catch(() => {});
-    return { child, done };
+    return { child, done, output: () => ({ stdout, stderr }) };
   }
   function cmd(name, args, options) {
     // cmd /s /c requires an outer quote around a quoted executable. All values
@@ -1571,17 +1571,33 @@ async function smoke() {
         "--window-size=1280,900",
         "about:blank",
       ],
-      { timeout: 0 },
+      {
+        timeout: 0,
+        // The imported-CLI fixture's synthetic home is not a Windows user profile.
+        // Keep the browser's real OS profile variables; its browsing state still
+        // lives only in the explicitly owned --user-data-dir above.
+        environment: Object.fromEntries([
+          ...Object.entries(env).filter(([key]) => !/^(HOME|USERPROFILE)$/i.test(key)),
+          ...Object.entries(process.env).filter(([key]) => /^(HOME|USERPROFILE)$/i.test(key)),
+        ]),
+      },
     );
     let pageTarget;
     report.webUiDiagnostics.stage = "browser startup";
     await waitFor(async () => {
+      if (browser.child.exitCode !== null) {
+        recordCommandFailure("Approved browser exited before CDP readiness", {
+          code: browser.child.exitCode, ...browser.output(),
+        });
+        throw new Error("Approved browser exited before CDP readiness");
+      }
       try {
-        const targets = await (
-          await fetch(`http://127.0.0.1:${browserPort}/json/list`, {
-            signal: AbortSignal.timeout(1500),
-          })
-        ).json();
+        const response = await fetch(`http://127.0.0.1:${browserPort}/json/list`, {
+          signal: AbortSignal.timeout(1500),
+        });
+        report.webUiDiagnostics.debugEndpointStatus = response.status;
+        const targets = await response.json();
+        report.webUiDiagnostics.debugEndpointIsTargetList = Array.isArray(targets);
         pageTarget = targets.find((target) => target.type === "page");
         return Boolean(pageTarget?.webSocketDebuggerUrl);
       } catch {
@@ -1747,6 +1763,16 @@ async function smoke() {
       ]);
       report.webUiDiagnostics.failure = messages.has(error?.message)
         ? error.message : "other recorded failure";
+      if (browser) {
+        const output = browser.output();
+        const text = `${output.stdout}\n${output.stderr}`;
+        report.webUiDiagnostics.browserProcessExitCode = browser.child.exitCode;
+        report.webUiDiagnostics.devToolsAnnouncement = /DevTools listening on ws:/i.test(text);
+        report.webUiDiagnostics.browserOutputClassifications = classifyPrivateOutput(text);
+        report.webUiDiagnostics.browserProfileFailure =
+          /(?:user data|profile|data directory).{0,80}(?:failed|error|cannot|denied)|(?:failed|cannot).{0,80}(?:profile|data directory)/i.test(text);
+        report.webUiDiagnostics.browserSandboxFailure = /sandbox.{0,80}(?:failed|error|denied)/i.test(text);
+      }
       if (browserCdp) {
         try {
           const snapshot = await browserCdp.send("Runtime.evaluate", {
