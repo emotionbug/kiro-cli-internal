@@ -54,6 +54,9 @@ upstream.on("connect", (request, socket, head) => {
     if (!socket.write(data)) socket.pause();
   });
   socket.on("drain", () => socket.resume());
+  // HTTP upgrade sockets are half-open: acknowledge the peer's FIN after
+  // flushing queued echoes, rather than occupying a worker until idle timeout.
+  socket.on("end", () => socket.end());
 });
 const pacPath = `/${randomBytes(24).toString("hex")}.pac`;
 const pac = http.createServer((request, response) => {
