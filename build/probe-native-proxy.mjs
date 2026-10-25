@@ -78,12 +78,14 @@ async function listen(server) {
   });
 }
 async function command(file, args, env = process.env) {
+  const label = path.basename(file);
+  process.stderr.write(`[native-proxy-probe] command ${label}\n`);
   return await new Promise((resolve, reject) => {
     const child = spawn(file, args, { windowsHide: true, env, stdio: ["ignore", "pipe", "pipe"] });
     let text = "";
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error("Native probe command timed out"));
+      reject(new Error(`Native probe command ${label} timed out`));
     }, timeoutMs);
     child.stdout.on("data", (data) => {
       text += data;
@@ -166,6 +168,7 @@ async function startHelper({ upstreamAddress = "", pacUrl = "" }) {
   };
 }
 async function memory(helper, phase) {
+  process.stderr.write(`[native-proxy-probe] memory ${phase}\n`);
   assert.equal(helper.child.exitCode, null, "Memory samples must target the live owned child");
   assert.equal(helper.child.signalCode, null);
   const powershell = path.join(

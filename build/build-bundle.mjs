@@ -781,6 +781,12 @@ try {
   const probeEnv = {
     SystemRoot: process.env.SystemRoot,
     ComSpec: process.env.ComSpec,
+    WINDIR: process.env.WINDIR,
+    SystemDrive: process.env.SystemDrive,
+    ProgramFiles: process.env.ProgramFiles,
+    "ProgramFiles(x86)": process.env["ProgramFiles(x86)"],
+    ProgramW6432: process.env.ProgramW6432,
+    PSModulePath: process.env.PSModulePath,
     TEMP: work,
     TMP: work,
     USERPROFILE: work,
