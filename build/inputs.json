@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "sourceDateEpoch": 1792886400,
+  "target": "win32-x64",
+  "assets": {
+    "opensslLicense": {
+      "version": "3.0.18",
+      "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.0.18/LICENSE.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    "opensslAuthors": {
+      "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.0.18/AUTHORS.md",
+      "sha256": "5076ca441daef7fb35e904c2ac070880c7b3d58300a5a6aecac41e8f525f4412"
+    },
+    "python": {
+      "version": "3.13.12",
+      "url": "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip",
+      "sha256": "76f238f606250c87c6beac75dccd35ee99070a13490555936abb6cb64ecce3d0",
+      "checksumSource": "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip.spdx.json",
+      "license": "PSF-2.0 and complete upstream Windows LICENSE.txt; third-party source notices retained",
+      "purpose": "On-demand isolated standard-library utility interpreter; not a pip/project-venv distribution"
+    },
+    "pythonSbom": {
+      "url": "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip.spdx.json",
+      "sha256": "77d9c3178214fa388af16c29d64feadee7dcbc8472022f95cf00aefa6a37064a"
+    },
+    "pythonSignature": {
+      "url": "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip.sigstore",
+      "sha256": "9d1ff3a2aa4e82a08057ddf6dfa6aafed04b169c10d4504b39a7a9884ebce246"
+    },
+    "pythonSource": {
+      "url": "https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz",
+      "sha256": "12e7cb170ad2d1a69aee96a1cc7fc8de5b1e97a2bdac51683a3db016ec9a2996",
+      "checksumSource": "https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz.sigstore",
+      "purpose": "Complete source and third-party notices; not extracted onto runtime search paths"
+    },
+    "pythonSourceSignature": {
+      "url": "https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz.sigstore",
+      "sha256": "da88d50a2cb2a6f67c381eca4d87da5d31d5053615cc8d6c637a35e1c2a054a4"
+    },
+    "rg": {
+      "version": "15.1.0",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a",
+      "checksumSource": "https://api.github.com/repos/BurntSushi/ripgrep/releases/tags/15.1.0",
+      "license": "MIT OR Unlicense; complete official ZIP retained under runtime/tools/ripgrep"
+    },
+    "jq": {
+      "version": "1.8.1",
+      "url": "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-windows-amd64.exe",
+      "sha256": "23cb60a1354eed6bcc8d9b9735e8c7b388cd1fdcb75726b93bc299ef22dd9334",
+      "checksumSource": "https://api.github.com/repos/jqlang/jq/releases/tags/jq-1.8.1",
+      "license": "MIT and bundled dtoa/decNumber/NetBSD/Oniguruma notices; supplemental GCC/MinGW runtime licenses"
+    },
+    "jqSource": {
+      "url": "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-1.8.1.tar.gz",
+      "sha256": "2be64e7129cecb11d5906290eba10af694fb9e3e7f9fc208a311dc33ca837eb0",
+      "checksumSource": "https://api.github.com/repos/jqlang/jq/releases/tags/jq-1.8.1"
+    },
+    "gccRuntimeLicense": {
+      "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-15.1.0/COPYING.RUNTIME",
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+    },
+    "gccLicense": {
+      "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-15.1.0/COPYING3",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    "mingwLicense": {
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/v12.0.0/COPYING",
+      "sha256": "99a69660981156c21336fdb5661f89341b013c94e4bf9e1c7467b4745718397f"
+    },
+    "mingwRuntimeNotices": {
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/v12.0.0/COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt",
+      "sha256": "e9b2dc02451ea29092a1f25fa0f3c07207ed421f1807dffb0c4e6dce69dee7bd"
+    },
+    "mingwThreadsLicense": {
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/v12.0.0/mingw-w64-libraries/winpthreads/COPYING",
+      "sha256": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177"
+    },
+    "mingwAuthors": {
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/v12.0.0/AUTHORS",
+      "sha256": "8f308316e7a94b8410f871868bd3948f126526dc1775aeee97a0e365f9a0fd9f"
+    },
+    "node": {
+      "version": "22.23.4",
+      "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip",
+      "sha256": "cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20",
+      "license": "Node.js LICENSE (includes third-party notices)"
+    },
+    "omp": {
+      "version": "18.12.6",
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/omp-windows-x64.exe",
+      "sha256": "73d73c11dc8821cf939441a964992aefc9c5b0d5a4418e9e8985a46439b60eef",
+      "license": "MIT; bundled third-party notices"
+    },
+    "ompLicense": {
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/LICENSE",
+      "sha256": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63"
+    },
+    "ompNotices": {
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/THIRD-PARTY-NOTICES.txt",
+      "sha256": "768612d40a4d1788813b997b011290d0f08c426add452de6560bf227cd1fc29d"
+    },
+    "git": {
+      "version": "2.56.0.windows.3",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/PortableGit-2.56.0.3-64-bit.7z.exe",
+      "sha256": "4fc27b779829a36df77911e3f4dea09c66c790dd6c5f7dfa3b6a5479f1fe354f",
+      "license": "GPL-2.0 and bundled component licenses; retain complete portable distribution",
+      "purpose": "Paseo Git operations and OMP external POSIX interactive PTY/service shell; OMP finite native shell itself does not require Bash"
+    },
+    "gitSource": {
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/mingw-w64-git-2.56.0.3-1.src.tar.gz",
+      "sha256": "0831b5fc86c38a6f91e597629ec3d12cd24712c2ff9830a49a6661178b753163"
+    },
+    "plugin": {
+      "version": "0.4.0",
+      "commit": "ea833ca287082fdb17ec709db3d48834189a1054",
+      "url": "https://codeload.github.com/emotionbug/omp-kiro/tar.gz/ea833ca287082fdb17ec709db3d48834189a1054",
+      "sha256": "cd376d1fcfea4b7e74b7da42ed8f3046ef2d57de04ebd602402ff02d8d13dc00",
+      "license": "Apache-2.0"
+    },
+    "paseoLicense": {
+      "commit": "d34d17a9072149320ace35ec2a2e5c7dcd992cb3",
+      "url": "https://raw.githubusercontent.com/getpaseo/paseo/d34d17a9072149320ace35ec2a2e5c7dcd992cb3/LICENSE",
+      "sha256": "79d5aedce6aa0adc547336dc1bd34c5cc9308ba110fac7079ed97515ee573ad3"
+    },
+    "sherpaLicense": {
+      "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.12.28/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "onnxLicense": {
+      "version": "1.23.2",
+      "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.23.2/LICENSE",
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+    },
+    "onnxNotices": {
+      "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.23.2/ThirdPartyNotices.txt",
+      "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+    },
+    "weztermSource": {
+      "version": "20240203-110809-5046fc22",
+      "url": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/wezterm-20240203-110809-5046fc22-src.tar.gz",
+      "sha256": "df60b1081d402b5a9239cc4cef16fc699eab68bbbeac9c669cb5d991a6010b2c",
+      "checksumSource": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/wezterm-20240203-110809-5046fc22-src.tar.gz.sha256",
+      "projection": "License/copyright/copying/notice files only, including component and font notices; no source compiler or legacy package in the production ZIP."
+    },
+    "wezterm": {
+      "version": "20240203-110809-5046fc22",
+      "url": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip",
+      "sha256": "57e5d03b585303d81e8b8e96d1230362852eb39aca92b3b29c7a42cfb82f9ac4",
+      "checksumSource": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip.sha256",
+      "license": "MIT and bundled third-party notices",
+      "projection": "Official portable ZIP, retaining component licenses; exclude Mesa, debug symbols and upstream configuration. Software frontend starts only for interactive OMP."
+    }
+  }
+}

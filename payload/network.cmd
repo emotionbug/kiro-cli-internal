@@ -1,0 +1,4 @@
+@echo off
+setlocal
+"%~dp0runtime\node\node.exe" --max-old-space-size=128 "%~dp0app\lib\run.mjs" network %*
+exit /b %errorlevel%

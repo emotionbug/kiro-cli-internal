@@ -1,0 +1,11 @@
+{
+  "name": "kiro-cli-internal",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:windows": "node build/build-bundle.mjs",
+    "smoke:windows": "node test/windows-smoke.mjs"
+  }
+}
