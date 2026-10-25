@@ -105,6 +105,7 @@ test("mixed-case inherited environment cannot escape the private runtime or inje
     node_options: "--require injected",
     BuN_Options: "injected",
     omp_kiro_auth_file: "foreign",
+    omp_kiro_model_catalog_file: "foreign",
     kiro_internal_data_dir: "foreign",
     NODE_EXTRA_CA_CERTS: "enterprise.pem",
   });
@@ -115,6 +116,8 @@ test("mixed-case inherited environment cannot escape the private runtime or inje
   assert.ok(env.PATH.endsWith(path.delimiter + "inherited-tools"));
   assert.equal(env.PASEO_HOME, state.home);
   assert.equal(env.OMP_KIRO_AUTH_FILE, state.authFile);
+  assert.equal(env.OMP_KIRO_MODEL_CATALOG_FILE, path.join(state.root, "models.json"));
+  assert.equal(env.omp_kiro_model_catalog_file, undefined);
   assert.equal(env.NODE_OPTIONS, "--max-old-space-size=192");
   assert.equal(env.NODE_EXTRA_CA_CERTS, "enterprise.pem");
   assert.equal(env.paseo_host, undefined);
@@ -161,6 +164,11 @@ test("Paseo disables an empty catalog, restores initial activation and preserves
   await catalog(state, fixtureModels);
   config = await configurePaseo(state);
   assert.equal(config.agents.providers[profileId].enabled, true);
+  for (const provider of [profileId, "kiro-http"])
+    assert.equal(
+      config.agents.providers[provider].env.OMP_KIRO_MODEL_CATALOG_FILE,
+      path.join(state.root, "models.json"),
+    );
   assert.equal(
     config.daemon.agentProfiles.find((profile) => profile.id === profileId).model,
     "kiro-http/auto",
@@ -170,6 +178,8 @@ test("Paseo disables an empty catalog, restores initial activation and preserves
     true,
   );
   config.agents.providers[profileId].enabled = false;
+  for (const provider of [profileId, "kiro-http"])
+    config.agents.providers[provider].env.omp_kiro_model_catalog_file = "foreign";
   config.agents.providers.codex = { enabled: true, env: { CUSTOM: "retained" } };
   config.pluginsEnabled = false;
   await save(path.join(state.home, "config.json"), config);
@@ -179,6 +189,13 @@ test("Paseo disables an empty catalog, restores initial activation and preserves
   await catalog(state, fixtureModels);
   config = await configurePaseo(state);
   assert.equal(config.agents.providers[profileId].enabled, false);
+  for (const provider of [profileId, "kiro-http"]) {
+    assert.equal(
+      config.agents.providers[provider].env.OMP_KIRO_MODEL_CATALOG_FILE,
+      path.join(state.root, "models.json"),
+    );
+    assert.equal(config.agents.providers[provider].env.omp_kiro_model_catalog_file, undefined);
+  }
   assert.deepEqual(config.agents.providers.codex, { enabled: true, env: { CUSTOM: "retained" } });
   assert.equal(config.pluginsEnabled, false);
 });

@@ -266,6 +266,7 @@ export function runtimeEnv(state, env = process.env) {
     PI_CODING_AGENT_DIR: path.join(state.root, "omp"),
     OMP_KIRO_TRANSPORT: "http",
     OMP_KIRO_AUTH_FILE: state.authFile,
+    OMP_KIRO_MODEL_CATALOG_FILE: path.join(state.root, "models.json"),
     KIRO_INTERNAL_DATA_DIR: state.root,
   };
 }
@@ -389,8 +390,13 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
     label: "Kiro HTTP (OMP)",
     command: [path.join(bundleRoot, "runtime/omp/omp.exe"), ...ompArgs()],
     env: {
-      ...providers[profileId]?.env,
+      ...Object.fromEntries(
+        Object.entries(providers[profileId]?.env ?? {}).filter(
+          ([key]) => !/^OMP_KIRO_MODEL_CATALOG_FILE$/i.test(key),
+        ),
+      ),
       OMP_KIRO_AUTH_FILE: state.authFile,
+      OMP_KIRO_MODEL_CATALOG_FILE: path.join(state.root, "models.json"),
       OMP_KIRO_TRANSPORT: "http",
       NODE_OPTIONS: "",
       HOME: state.root,
@@ -404,7 +410,15 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
   providers["kiro-http"] = {
     ...providers["kiro-http"],
     enabled: providers["kiro-http"]?.enabled ?? false,
-    env: { ...providers["kiro-http"]?.env, OMP_KIRO_AUTH_FILE: state.authFile },
+    env: {
+      ...Object.fromEntries(
+        Object.entries(providers["kiro-http"]?.env ?? {}).filter(
+          ([key]) => !/^OMP_KIRO_MODEL_CATALOG_FILE$/i.test(key),
+        ),
+      ),
+      OMP_KIRO_AUTH_FILE: state.authFile,
+      OMP_KIRO_MODEL_CATALOG_FILE: path.join(state.root, "models.json"),
+    },
   };
   const profiles = (previous.daemon?.agentProfiles ?? []).filter(
     (profile) => profile.id !== profileId,

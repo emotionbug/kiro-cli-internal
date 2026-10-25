@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { createRequire } from "node:module";
@@ -71,6 +71,10 @@ async function smoke() {
       samples: [],
     },
   };
+  const upstreamRequests = (report.upstreamRequests = {
+    management: { total: 0, catalog: 0, usage: 0, other: 0, clients: { Node: 0, Bun: 0, other: 0 } },
+    runtime: { total: 0, generation: 0, search: 0, other: 0, clients: { Node: 0, Bun: 0, other: 0 } },
+  });
   const commands = new Set();
   const sockets = new Set();
   const servers = [];
@@ -184,10 +188,9 @@ async function smoke() {
       options,
     );
   }
-  function recordCommandFailure(label, result) {
-    const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-    // Emit only fixed classifications/code tokens, never raw output or argument
-    // values: sanitizing arbitrary logs cannot reliably remove every credential.
+  function classifyPrivateOutput(text) {
+    // Export only fixed whitelist classifications, never raw log fragments,
+    // paths, credentials, headers or arguments from any child or private log.
     const signatures = [
       ["ERR_MODULE_NOT_FOUND", /\bERR_MODULE_NOT_FOUND\b/],
       ["MODULE_NOT_FOUND", /\bMODULE_NOT_FOUND\b/],
@@ -202,6 +205,26 @@ async function smoke() {
       [
         "TLS_CERTIFICATE_REJECTED",
         /CERT_(?:AUTHORITY_INVALID|HAS_EXPIRED)|SELF_SIGNED_CERT|UNABLE_TO_VERIFY|unable to verify|certificate verify failed|self.signed certificate/i,
+      ],
+      [
+        "TLS_HANDSHAKE_FAILED",
+        /ERR_(?:TLS|SSL)_|TLS.{0,60}(?:handshake|failed|error)|SSL.{0,60}(?:handshake|failed|error)/i,
+      ],
+      [
+        "EXTENSION_LOAD_FAILED",
+        /(?:extension|plugin).{0,120}(?:failed to load|load failed|error loading|failed to import)|(?:failed to load|error loading|failed to import).{0,120}(?:extension|plugin)|ExtensionLoadError/i,
+      ],
+      [
+        "MODEL_DISCOVERY_FAILED",
+        /(?:model discovery|discover.{0,20}models|fetchDynamicModels|ListAvailableModels).{0,120}(?:failed|error|rejected|timeout)|(?:failed|error).{0,120}(?:model discovery|fetchDynamicModels|ListAvailableModels)/i,
+      ],
+      [
+        "MODEL_CATALOG_REJECTED",
+        /models\.cmd|model catalog.{0,100}(?:invalid|malformed|mismatch|account|failed|missing)|OMP_KIRO_MODEL_CATALOG_FILE/i,
+      ],
+      [
+        "MANAGED_AUTH_FAILED",
+        /KiroAuthError|managed (?:Kiro )?(?:credential|login|auth)|Cannot open authentication storage|login expired|invalid_grant|login_expired|UnauthorizedException|AccessDeniedException|Kiro HTTP (?:401|403)/i,
       ],
       ["CLI_UNKNOWN_OPTION", /unknown option|unrecognized option/i],
       ["CLI_UNKNOWN_COMMAND", /unknown command/i],
@@ -241,14 +264,14 @@ async function smoke() {
     ];
     for (const code of knownCliCodes)
       if (new RegExp(`\\b${code}\\b`).test(text)) classes.push(code);
-    const option = text.match(
-      /(?:unknown|unrecognized) option ['"]?(--[a-z][a-z-]{0,50})(?:['"\s]|$)/i,
-    )?.[1];
+    return classes.length ? classes : ["UNCLASSIFIED_PRIVATE_OUTPUT"];
+  }
+  function recordCommandFailure(label, result) {
+    const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     (report.commandFailures ??= []).push({
       command: label,
       exitCode: result.code,
-      classifications: classes.length ? classes : ["UNCLASSIFIED_PRIVATE_OUTPUT"],
-      ...(option ? { rejectedOption: option } : {}),
+      classifications: classifyPrivateOutput(text),
       operationTokens: ["spawn", "open", "stat", "lstat", "mkdir", "realpath"].filter(
         (operation) => new RegExp(`\\b${operation}\\b`, "i").test(text),
       ),
@@ -263,6 +286,65 @@ async function smoke() {
       ).map(([role]) => role),
       unpinnedOmpSpawn: /\bspawn\s+omp(?:\.exe)?\s+ENOENT\b/i.test(text),
     });
+  }
+  async function recordOwnedOmpLogFailures() {
+    const roots = [
+      ["private-config", path.join(data, "config/logs")],
+      ["private-agent", path.join(data, "omp/logs")],
+    ];
+    report.ompLogFailures = [];
+    for (const [role, root] of roots) {
+      const counts = { role, filesRead: 0, bytesRead: 0, truncatedFiles: 0, unreadableEntries: 0 };
+      const classifications = new Set();
+      async function visit(directory) {
+        let entries;
+        try {
+          const info = await lstat(directory);
+          if (!info.isDirectory() || info.isSymbolicLink()) {
+            counts.unreadableEntries++;
+            return;
+          }
+          entries = await readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          if (error.code !== "ENOENT") counts.unreadableEntries++;
+          return;
+        }
+        for (const entry of entries) {
+          const file = path.join(directory, entry.name);
+          if (entry.isSymbolicLink()) {
+            counts.unreadableEntries++;
+            continue;
+          }
+          if (entry.isDirectory()) {
+            await visit(file);
+            continue;
+          }
+          if (!entry.isFile()) continue;
+          let handle;
+          try {
+            handle = await open(file, "r");
+            const size = (await handle.stat()).size;
+            const length = Math.min(size, 4 * 1024 * 1024);
+            const bytes = Buffer.alloc(length);
+            const { bytesRead } = await handle.read(bytes, 0, length, Math.max(0, size - length));
+            counts.filesRead++;
+            counts.bytesRead += bytesRead;
+            if (size > length) counts.truncatedFiles++;
+            for (const value of classifyPrivateOutput(bytes.subarray(0, bytesRead).toString("utf8")))
+              if (value !== "UNCLASSIFIED_PRIVATE_OUTPUT") classifications.add(value);
+          } catch {
+            counts.unreadableEntries++;
+          } finally {
+            await handle?.close().catch(() => {});
+          }
+        }
+      }
+      await visit(root);
+      report.ompLogFailures.push({
+        ...counts,
+        classifications: [...classifications].sort(),
+      });
+    }
   }
   async function checked(job, label) {
     let result;
@@ -517,6 +599,23 @@ async function smoke() {
       async (request, response) => {
         try {
           const host = request.headers.host?.replace(/:443$/, "");
+          const target = request.headers["x-amz-target"];
+          const group = host === "management.us-east-1.kiro.dev"
+            ? upstreamRequests.management
+            : host === "runtime.us-east-1.kiro.dev" ? upstreamRequests.runtime : null;
+          if (group) {
+            group.total++;
+            const agent = request.headers["user-agent"] ?? "";
+            const client = /^Bun(?:[ /]|$)/i.test(agent) ? "Bun"
+              : /^(?:node|undici|Node\.js)(?:[ /]|$)/i.test(agent) ? "Node" : "other";
+            group.clients[client]++;
+            const operation = host === "management.us-east-1.kiro.dev"
+              ? target === "KiroControlPlaneBearerService.ListAvailableModels" ? "catalog"
+                : target === "AmazonCodeWhispererService.GetUsageLimits" ? "usage" : "other"
+              : request.url.split("?")[0] === "/mcp" ? "search"
+                : target === "AmazonCodeWhispererStreamingService.GenerateAssistantResponse" ? "generation" : "other";
+            group[operation]++;
+          }
           assert.ok(
             ["runtime.us-east-1.kiro.dev", "management.us-east-1.kiro.dev"].includes(host),
             "Unexpected upstream HTTPS host",
@@ -886,6 +985,20 @@ async function smoke() {
     assert.equal(directBalance.remaining, 88.125);
     const catalog = JSON.parse(await readFile(path.join(data, "models.json"), "utf8"));
     assert.deepEqual(catalog.models.map((model) => model.id).sort(), ["auto", "fixture-named"]);
+    assert.match(catalog.accountId, /^[a-f0-9]{64}$/, "models.cmd must save only a safe account hash");
+    assert.deepEqual(Object.keys(catalog).sort(), ["accountId", "fetchedAt", "models", "version"]);
+    assert.equal(catalog.version, 1);
+    const { readKiroAuth } = await import(pathToFileURL(path.join(plugin, "server/auth.mjs")).href);
+    const { kiroCatalogAccountId, readKiroModelCatalog } = await import(
+      pathToFileURL(path.join(plugin, "server/model-catalog.mjs")).href
+    );
+    const managedAuth = await readKiroAuth({ authFile: path.join(data, "auth.sqlite3") });
+    assert.equal(catalog.accountId, kiroCatalogAccountId(managedAuth));
+    assert.deepEqual(
+      await readKiroModelCatalog(path.join(data, "models.json"), { auth: managedAuth }),
+      catalog.models,
+      "The shared reader must preserve exact account rows without aliases",
+    );
     const config = JSON.parse(await readFile(path.join(data, "paseo/config.json"), "utf8"));
     assert.deepEqual(
       config.agents.providers["kiro-omp-http"].models.map((model) => model.id).sort(),
@@ -895,6 +1008,12 @@ async function smoke() {
       config.daemon.agentProfiles.find((profile) => profile.id === "kiro-omp-http").model,
       "kiro-http/auto",
     );
+    assert.equal(
+      config.agents.providers["kiro-omp-http"].env.OMP_KIRO_MODEL_CATALOG_FILE,
+      path.join(data, "models.json"),
+    );
+    const catalogsBeforeColdStart = catalogs;
+    assert.equal(catalogsBeforeColdStart, 1, "Only models.cmd may fetch catalog metadata before cold start");
     assert.notEqual(
       config.daemon.auth.password,
       password,
@@ -985,6 +1104,11 @@ async function smoke() {
     }
     assert.equal(cliResult.status, "completed", "Actual Paseo CLI agent did not complete");
     assert.equal(
+      catalogs,
+      catalogsBeforeColdStart,
+      "Cold OMP startup must use the account snapshot without live model discovery or a warm-up CLI",
+    );
+    assert.equal(
       cliResult.provider,
       "kiro-omp-http",
       "Actual Paseo provider differs from OMP profile",
@@ -1041,6 +1165,14 @@ async function smoke() {
       selectedModelEveryTurn: models,
       catalogRequests: catalogs,
       discoveredModels: catalog.models.map((model) => model.id),
+      coldStartCatalog: {
+        source: "models.cmd account-bound snapshot",
+        accountIdFormat: "sha256 lowercase hex",
+        accountIdentityMatched: true,
+        rawRowsPreserved: true,
+        warmUpCli: false,
+        liveDiscoveryRequests: catalogs - catalogsBeforeColdStart,
+      },
       realTools: ["write", "web_search"],
       realToolResults: "success",
       recovery: {
@@ -1366,6 +1498,7 @@ async function smoke() {
     report.result = "passed";
     report.phase = "complete";
   } catch (error) {
+    await recordOwnedOmpLogFailures();
     // Never publish raw child output, error paths, stack traces or fixture secrets.
     report.failure = {
       type: error?.name ?? "Error",

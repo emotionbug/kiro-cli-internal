@@ -537,12 +537,19 @@ context = ssl.create_default_context(cafile=str(root.parent / "공개 인증서 
 assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
 assert context.cert_store_stats()["x509_ca"] >= 1 and len(context.get_ca_certs()) >= 1
 assert ssl.OPENSSL_VERSION.startswith("OpenSSL ")
-search = subprocess.run(["rg", "--json", "--line-number", "--fixed-strings", "--no-require-git", "--type-add", "fixture:*.txt", "--type", "fixture", "--glob", "!excluded/**", "--", needle, "."], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="strict", timeout=15, check=True)
-assert search.stderr == ""
-matches = [json.loads(line)["data"] for line in search.stdout.splitlines() if json.loads(line)["type"] == "match"]
-assert len(matches) == 1
-match = matches[0]
-assert (root / match["path"]["text"]).samefile(source)
+def search_matches(options):
+    search = subprocess.run(["rg", "--json", "--line-number", "--fixed-strings", "--no-require-git", *options, "--", needle, "."], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="strict", timeout=15, check=True)
+    assert search.stderr == ""
+    return [json.loads(line)["data"] for line in search.stdout.splitlines() if json.loads(line)["type"] == "match"]
+def matched_paths(matches):
+    return {(root / match["path"]["text"]).resolve() for match in matches}
+automatic = search_matches(["--glob", "!excluded/**"])
+assert matched_paths(automatic) == {source.resolve(), (root / "다른 형식.md").resolve()}
+# Explicit type whitelists override hidden filtering in upstream ripgrep:
+# https://github.com/BurntSushi/ripgrep/discussions/1699
+typed = search_matches(["--type-add", "fixture:*.txt", "--type", "fixture", "--glob", "!excluded/**"])
+assert matched_paths(typed) == {source.resolve(), (root / ".hidden.txt").resolve()}
+match = next(match for match in typed if (root / match["path"]["text"]).samefile(source))
 assert match["line_number"] == 2
 assert [part["match"]["text"] for part in match["submatches"]] == [needle]
 document = {"rows": [{"label": needle, "count": row[1]}], "matches": [{"line": match["line_number"], "text": needle}], "sqlite": row[0]}

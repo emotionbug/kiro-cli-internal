@@ -26,7 +26,7 @@ usage.cmd
 doctor.cmd --verify-all
 ```
 
-`models.cmd`는 실제 계정의 모델 목록을 다시 조회하고 이 패키지의 Paseo 카탈로그를 갱신합니다. 응답 생성 요청이나 다른 모델로의 자동 전환은 하지 않습니다. 로그인 계정이 달라지면 목록도 다시 가져옵니다. 다른 CLI가 설치돼 있다는 이유만으로 OMP 모델 목록에 Claude/Codex CLI가 모델로 추가되지는 않습니다.
+`models.cmd`는 실제 계정의 모델 목록을 조회하고 계정에 결합된 `models.json`과 Paseo 카탈로그를 갱신합니다. OMP/직접 HTTP 시작은 이 실제 메타데이터 스냅샷을 사용하므로 목록 재조회에 실패했다고 선택한 모델이 사라지거나 다른 모델로 바뀌지 않습니다. 모델을 만들어 넣거나 생성 요청으로 추측하지 않습니다. 갱신한 목록은 새 세션 또는 OMP 재로드에 반영합니다. 로그인 계정이 달라지면 이전 목록을 지우고 다시 가져옵니다. 프로필 ARN이 없는 인증에서 refresh token이 회전한 경우에도 `models.cmd`로 결합을 갱신해야 합니다. 다른 CLI가 설치돼 있다는 이유만으로 Claude/Codex CLI가 OMP 모델로 추가되지는 않습니다.
 
 ### 폐쇄망의 웹 검색
 
@@ -97,7 +97,7 @@ HTTPS CONNECT의 PAC 평가는 암호화된 전체 경로가 아닌 `https://호
 
 ### 구성·재현·검증 한계
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.2를 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, 배포 ZIP의 `LICENSES/` 및 `bundle-manifest.json`에 있습니다. Node 22.23.4, OMP 18.12.6, Paseo 0.13.0, omp-kiro 0.4.3을 고정합니다. npm 설치·컴파일·다운로드는 **인터넷 사용이 허용된 빌드 PC에서만** 수행합니다.
 
 ```powershell
 # Windows x64 MSVC Developer Command 환경에서
