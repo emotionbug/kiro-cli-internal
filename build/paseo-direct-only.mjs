@@ -158,6 +158,18 @@ export async function createAgentProviderRuntime(options) {
       source.delete(file);
     }
   }
+  // Some published declarations have no JavaScript companion. They do not
+  // participate in runtime imports and must not retain an omitted provider.
+  for (const { path: file } of await files(serverRoot)) {
+    if (!candidates(file)) continue;
+    const runtime = file.endsWith(".d.ts")
+      ? file.slice(0, -5) + ".js"
+      : file.endsWith(".js.map")
+        ? file.slice(0, -4)
+        : null;
+    if (runtime && !source.has(runtime))
+      await remove(file, "Orphan declaration/source map of an omitted provider or speech runtime");
+  }
   for (const file of await files(serverRoot)) {
     if (candidates(file.path) && /\.(?:onnx|dll|node|exe|bin|wasm)$/i.test(file.path))
       await remove(file.path, "Unused provider/speech binary asset; implementation omitted");

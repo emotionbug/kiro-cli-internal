@@ -93,6 +93,7 @@ jobs:
           $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
           $hasher = [Security.Cryptography.SHA256]::Create()
           $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          $byComponent = @{}
           try {
             if ($archive.Entries.Count -ne $expected.Count) { throw 'ZIP inventory count mismatch' }
             foreach ($entry in $archive.Entries) {
@@ -105,6 +106,19 @@ jobs:
               try { $digest = [Convert]::ToHexString($hasher.ComputeHash($stream)).ToLowerInvariant() }
               finally { $stream.Dispose() }
               if ($digest -ne $authority.sha256) { throw 'ZIP member SHA-256 mismatch' }
+              $segments = $entry.FullName -split '/'
+              $component = if ($segments.Length -gt 1) { $segments[0..1] -join '/' } else { '(root files)' }
+              if (-not $byComponent.ContainsKey($component)) {
+                $byComponent[$component] = [ordered]@{
+                  component = $component
+                  files = 0L
+                  uncompressedBytes = 0L
+                  compressedBytes = 0L
+                }
+              }
+              $byComponent[$component].files++
+              $byComponent[$component].uncompressedBytes += $entry.Length
+              $byComponent[$component].compressedBytes += $entry.CompressedLength
             }
           } finally { $hasher.Dispose(); $archive.Dispose() }
           $image = Join-Path $reportRoot 'web-ui.png'
@@ -121,6 +135,8 @@ jobs:
             archiveBytes = (Get-Item -LiteralPath $zipPath).Length
             archiveSha256 = $zipSha
             verifiedZipMembers = $seen.Count
+            compressedComponents = @($byComponent.Values | Sort-Object { $_.compressedBytes } -Descending)
+            compressedSizeScope = 'ZIP member data only; archiveBytes also includes ZIP headers and directory metadata'
             verification = 'Streamed SHA-256 and size of every ZIP member, including exact external manifest bytes; no target execution'
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $verificationPath -Encoding utf8
           $assets = @($zipPath, $checksumPath, $manifestPath, $verificationPath,
