@@ -119,6 +119,10 @@ node test/windows-smoke.mjs C:\Build\kiro-paseo-http-0.5.0-windows-x64 C:\Build\
 
 Release의 `report.json`, `reconnect.json`, `utilities.json`, `bundle-manifest.json`, `web-ui.png`, `release-verification.json`이 해당 배포의 검증 범위와 실측입니다. 프로세스별 working set 합은 공유 페이지를 중복 셀 수 있으며 고유 물리 메모리나 상한이 아닙니다.
 
+[Windows Server 2022 최종 검증](https://github.com/emotionbug/kiro-cli-internal/actions/runs/40813785340)을 통과했습니다. 실제 native Full access 파일 쓰기, Kiro 검색·인용·사용량, 모델 고정, 30초 복구 두 경로, Windows 경로 별칭, 개인 대화 기록, 수락/확인 유실 요청의 재접속·중복 방지, 실제 브라우저 큐 함수, 전용 종료와 전체 파일 무결성을 확인했습니다. [컴포넌트 Node 22/24·실제 HTTP continuation 회귀 검사](https://github.com/emotionbug/omp-kiro/actions/runs/40813782567)도 통과했습니다.
+
+완료 에이전트 1개·2초 idle에서 브라우저를 제외한 스택의 working set/private bytes 합은 약 **517/516 MiB**였습니다. 이전 0.4.0의 해당 단계는 약 827/940 MiB였습니다. 별도 CI 관측 비교이며 공유 페이지 중복·동시 에이전트·브라우저 메모리·실제 작업에 따라 달라집니다. 메모리 상한이나 일반 성능 보장은 아닙니다.
+
 **Server 2019/build 17763은 목표 환경이지 실행 검증 완료 환경이 아닙니다.** `server2019Verified:false`를 유지합니다. 실제 회사 네트워크와 인증 후 브라우저 상호작용은 별도 검증이 필요합니다.
 
 관련 출처: [Node 기업망 TLS](https://nodejs.org/learn/http/enterprise-network-configuration), [WinHTTP PAC](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpgetproxyforurl), [SSPI](https://learn.microsoft.com/en-us/windows/win32/secauthn/sspi), [HTTP 플러그인 소스](https://github.com/emotionbug/omp-kiro).
