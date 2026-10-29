@@ -77,6 +77,8 @@ network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem
 
 HOME/USERPROFILE은 호출 사용자의 원래 값을 유지하므로 기존 Git/SSH 설정을 사용할 수 있습니다. Paseo home·인증·모델 스냅샷은 `%LOCALAPPDATA%\KiroInternal`의 명시적인 전용 경로에 저장하고 사용자+SYSTEM ACL로 보호합니다. 다른 경로는 각 명령에 동일한 `--data-dir 절대경로`를 지정하세요. 인증 SQLite나 사용한 데이터 폴더를 재배포하지 마세요.
 
+네이티브 대화 기록은 같은 전용 데이터 폴더의 `.local\state\omp-kiro\paseo`에 저장합니다. `XDG_STATE_HOME`만 개인 경로로 고정하므로 HOME을 바꾸지 않고도 기록이 다른 설치와 섞이는 것을 방지합니다.
+
 실제 회사 내부 주소·PAC·SSPI·AppLocker/WDAC·서명 정책은 현장 승인이 필요합니다. CI에서 외부망을 막기 위한 브라우저 플래그는 배포 실행기에 넣지 않습니다.
 
 ### 동봉 유틸리티와 메모리

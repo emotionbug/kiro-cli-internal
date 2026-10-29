@@ -1361,6 +1361,23 @@ async function smoke() {
     ], "Actual native provider must complete the full controlled recovery sequence");
     assert.equal(await readFile(outputFile, "utf8"), guardedFileText);
     await delay(2000);
+    const nativeStateRoot = path.join(data, ".local", "state", "omp-kiro", "paseo");
+    const persistedConversations = [];
+    for (const entry of await readdir(nativeStateRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const bytes = await readFile(path.join(nativeStateRoot, entry.name), "utf8");
+      const saved = JSON.parse(bytes);
+      if (saved.model === "fixture-named" && bytes.includes(promptMarker))
+        persistedConversations.push(saved);
+    }
+    assert.equal(persistedConversations.length, 1, "Completed native conversation must persist under this package's private data root");
+    assert.equal(await realpath(persistedConversations[0].cwd), canonicalWorkspace);
+    report.nativePersistence = {
+      withinManagedPrivateData: true,
+      completedConversations: persistedConversations.length,
+      workspaceIdentityMatched: true,
+      containsActualPrompt: true,
+    };
     const idle = await sample("completed agent after two seconds idle", daemon.child.pid);
     assert.ok(
       idle.some((row) => /kiro-proxy/i.test(row.name)),

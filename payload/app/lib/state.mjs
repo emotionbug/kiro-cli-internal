@@ -239,7 +239,7 @@ export function runtimeEnv(state, env = process.env) {
   const clean = Object.fromEntries(
     entries.filter(
       ([key]) =>
-        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$)/i.test(
+        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$|XDG_STATE_HOME$)/i.test(
           key,
         ),
     ),
@@ -258,6 +258,7 @@ export function runtimeEnv(state, env = process.env) {
       ...(!activePython ? [inheritedPath] : []),
     ].join(path.delimiter),
     PASEO_HOME: state.home,
+    XDG_STATE_HOME: path.join(state.root, ".local", "state"),
     NO_PROXY: noProxy,
     no_proxy: noProxy,
     NODE_OPTIONS: `--max-old-space-size=${state.config.nodeHeapMb}`,
@@ -342,11 +343,12 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
     env: {
       ...Object.fromEntries(
         Object.entries(previousProvider?.env ?? {}).filter(
-          ([key]) => !/^(?:OMP_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|HOME$|USERPROFILE$|NODE_OPTIONS$)/i.test(key),
+          ([key]) => !/^(?:OMP_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|HOME$|USERPROFILE$|NODE_OPTIONS$|XDG_STATE_HOME$)/i.test(key),
         ),
       ),
       OMP_KIRO_AUTH_FILE: state.authFile,
       OMP_KIRO_MODEL_CATALOG_FILE: catalogFile,
+      XDG_STATE_HOME: path.join(state.root, ".local", "state"),
     },
     models,
   };
