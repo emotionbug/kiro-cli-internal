@@ -1,5 +1,4 @@
-// This import is injected only into the bundle's owned Node processes. Bun OMP
-// uses HTTP[S]_PROXY and NODE_EXTRA_CA_CERTS instead of this Node preloader.
+// Injected only into this bundle's owned Node processes.
 import http from "node:http";
 import https from "node:https";
 import { Agent, Dispatcher, ProxyAgent as UndiciProxyAgent, setGlobalDispatcher } from "undici";

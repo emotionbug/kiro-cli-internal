@@ -87,26 +87,12 @@
       "sha256": "cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20",
       "license": "Node.js LICENSE (includes third-party notices)"
     },
-    "omp": {
-      "version": "18.12.6",
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/omp-windows-x64.exe",
-      "sha256": "73d73c11dc8821cf939441a964992aefc9c5b0d5a4418e9e8985a46439b60eef",
-      "license": "MIT; bundled third-party notices"
-    },
-    "ompLicense": {
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/LICENSE",
-      "sha256": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63"
-    },
-    "ompNotices": {
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/THIRD-PARTY-NOTICES.txt",
-      "sha256": "768612d40a4d1788813b997b011290d0f08c426add452de6560bf227cd1fc29d"
-    },
     "git": {
       "version": "2.56.0.windows.3",
       "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/PortableGit-2.56.0.3-64-bit.7z.exe",
       "sha256": "4fc27b779829a36df77911e3f4dea09c66c790dd6c5f7dfa3b6a5479f1fe354f",
       "license": "GPL-2.0 and bundled component licenses; retain complete portable distribution",
-      "purpose": "Paseo Git operations and OMP external POSIX interactive PTY/service shell; OMP finite native shell itself does not require Bash"
+      "purpose": "Paseo Git operations and complete POSIX Git Bash/terminal utilities; preserved unmodified"
     },
     "gitSource": {
       "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/mingw-w64-git-2.56.0.3-1.src.tar.gz",
@@ -123,34 +109,6 @@
       "commit": "d34d17a9072149320ace35ec2a2e5c7dcd992cb3",
       "url": "https://raw.githubusercontent.com/getpaseo/paseo/d34d17a9072149320ace35ec2a2e5c7dcd992cb3/LICENSE",
       "sha256": "79d5aedce6aa0adc547336dc1bd34c5cc9308ba110fac7079ed97515ee573ad3"
-    },
-    "sherpaLicense": {
-      "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.12.28/LICENSE",
-      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-    },
-    "onnxLicense": {
-      "version": "1.23.2",
-      "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.23.2/LICENSE",
-      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
-    },
-    "onnxNotices": {
-      "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.23.2/ThirdPartyNotices.txt",
-      "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
-    },
-    "weztermSource": {
-      "version": "20240203-110809-5046fc22",
-      "url": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/wezterm-20240203-110809-5046fc22-src.tar.gz",
-      "sha256": "df60b1081d402b5a9239cc4cef16fc699eab68bbbeac9c669cb5d991a6010b2c",
-      "checksumSource": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/wezterm-20240203-110809-5046fc22-src.tar.gz.sha256",
-      "projection": "License/copyright/copying/notice files only, including component and font notices; no source compiler or legacy package in the production ZIP."
-    },
-    "wezterm": {
-      "version": "20240203-110809-5046fc22",
-      "url": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip",
-      "sha256": "57e5d03b585303d81e8b8e96d1230362852eb39aca92b3b29c7a42cfb82f9ac4",
-      "checksumSource": "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip.sha256",
-      "license": "MIT and bundled third-party notices",
-      "projection": "Official portable ZIP, retaining component licenses; exclude Mesa, debug symbols and upstream configuration. Software frontend starts only for interactive OMP."
     }
   }
 }

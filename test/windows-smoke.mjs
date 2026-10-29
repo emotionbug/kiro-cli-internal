@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { createRequire } from "node:module";
@@ -56,7 +56,8 @@ async function smoke() {
   const tlsDir = path.join(scratch, "tls");
   await Promise.all([mkdir(workspace), mkdir(tlsDir)]);
   const report = {
-    qualification: "assembled Windows ZIP: Paseo -> OMP -> pinned Kiro HTTP plugin",
+    qualification: "assembled Windows ZIP: Paseo -> native pinned Kiro HTTP provider",
+    startedAt: new Date().toISOString(),
     upstream: "controlled loopback HTTPS fixture; no real account or service generation",
     platform: process.platform,
     architecture: process.arch,
@@ -72,30 +73,28 @@ async function smoke() {
     },
   };
   const upstreamRequests = (report.upstreamRequests = {
-    management: { total: 0, catalog: 0, usage: 0, other: 0, clients: { Node: 0, Bun: 0, other: 0 } },
-    runtime: { total: 0, generation: 0, search: 0, other: 0, clients: { Node: 0, Bun: 0, other: 0 } },
+    management: { total: 0, catalog: 0, usage: 0, other: 0, clients: { Node: 0, other: 0 } },
+    runtime: { total: 0, generation: 0, search: 0, other: 0, clients: { Node: 0, other: 0 } },
   });
   const commands = new Set();
   const sockets = new Set();
   const servers = [];
   const knownOwned = new Map();
   const browserOwned = new Map();
-  const tuiOwned = new Map();
   const violations = [];
-  const ompLogCheckpoint = new Map();
-  let ompLogCheckpointTaken = false;
+  const nativeLogCheckpoint = new Map();
+  let nativeLogCheckpointTaken = false;
   const models = [];
   let daemon,
     browser,
     browserCdp,
     uiOrigin,
-    tui,
     fixtureFailure,
     pristine,
     stopComplete = false;
   const password = randomBytes(32).toString("base64url");
   const accessToken = randomBytes(32).toString("base64url");
-  const fileText = "KIRO_PORTABLE_REAL_OMP_WRITE\nUnicode: 한글 ✓\n";
+  const fileText = "KIRO_PORTABLE_NATIVE_WRITE\nUnicode: 한글 ✓\n";
   const outputFile = path.join(workspace, "chain result 한글.txt");
   const toolId = "portable-smoke-write-1";
   const searchToolId = "portable-smoke-search-1";
@@ -299,7 +298,6 @@ async function smoke() {
       ["DAEMON_UNREACHABLE", /\bDAEMON_UNREACHABLE\b|Cannot connect to daemon/i],
       ["SYNTAX_ERROR", /\bSyntaxError\b/],
       ["TYPE_ERROR", /\bTypeError\b/],
-      ["BUN_RUNTIME_CRASH", /Bun (?:has crashed|crashed)|panic:|Segmentation fault/i],
     ];
     const classes = signatures.filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
     const knownCliCodes = [
@@ -329,7 +327,6 @@ async function smoke() {
         (operation) => new RegExp(`\\b${operation}\\b`, "i").test(text),
       ),
       referencedRuntimeRoles: [
-        ["bundled-omp", path.join(bundle, "runtime/omp/omp.exe")],
         ["bundled-node", path.join(bundle, "runtime/node/node.exe")],
         ["workspace", workspace],
         ["managed-auth", path.join(data, "auth.sqlite3")],
@@ -337,20 +334,16 @@ async function smoke() {
         text.toLowerCase().includes(value.toLowerCase()) ||
         text.toLowerCase().includes(JSON.stringify(value).slice(1, -1).toLowerCase()),
       ).map(([role]) => role),
-      unpinnedOmpSpawn: /\bspawn\s+omp(?:\.exe)?\s+ENOENT\b/i.test(text),
     });
   }
-  async function recordOwnedOmpLogFailures(checkpoint = false) {
-    const roots = [
-      ["private-config", path.join(data, "config/logs")],
-      ["private-agent", path.join(data, "omp/logs")],
-    ];
+  async function recordOwnedNativeLogFailures(checkpoint = false) {
+    const roots = [["private-paseo", path.join(data, "paseo/logs")]];
     if (!checkpoint) {
-      report.ompLogFailureScope = ompLogCheckpointTaken
-        ? "Only bytes appended after the actual-agent launch checkpoint; shared logs are not proof of session attribution"
-        : "Not collected: no actual-agent launch checkpoint; earlier discovery includes an intentional untrusted-TLS failure";
-      report.ompLogFailures = [];
-      if (!ompLogCheckpointTaken) return;
+      report.nativeLogFailureScope = nativeLogCheckpointTaken
+        ? "Only bytes appended after the actual-agent launch checkpoint"
+        : "Not collected: no actual-agent launch checkpoint";
+      report.nativeLogFailures = [];
+      if (!nativeLogCheckpointTaken) return;
     }
     for (const [role, root] of roots) {
       const counts = { role, filesRead: 0, bytesRead: 0, truncatedFiles: 0, unreadableEntries: 0 };
@@ -385,10 +378,10 @@ async function smoke() {
             handle = await open(file, "r");
             const { size, birthtimeMs } = await handle.stat();
             if (checkpoint) {
-              ompLogCheckpoint.set(file, { size, birthtimeMs });
+              nativeLogCheckpoint.set(file, { size, birthtimeMs });
               continue;
             }
-            const prior = ompLogCheckpoint.get(file);
+            const prior = nativeLogCheckpoint.get(file);
             const start = prior?.birthtimeMs === birthtimeMs && size >= prior.size ? prior.size : 0;
             const length = Math.min(size - start, 4 * 1024 * 1024);
             if (!length) continue;
@@ -410,20 +403,20 @@ async function smoke() {
       }
       await visit(root);
       if (!checkpoint)
-        report.ompLogFailures.push({
+        report.nativeLogFailures.push({
           ...counts,
           classifications: [...classifications].sort(),
           tlsAndProxyCodes: [...tlsAndProxyCodes].sort(),
         });
     }
-    if (checkpoint) ompLogCheckpointTaken = true;
+    if (checkpoint) nativeLogCheckpointTaken = true;
   }
   async function recordPublishedCaBundles(approvedCa) {
-    // This inspects only the owned wrapper's immutable exports. It does not
-    // pretend that file presence proves a running OMP inherited or loaded it.
+    // Inspect only the owned wrapper's immutable exports. File presence does
+    // not prove that a running provider loaded the trust bundle.
     const observation = (report.approvedCaBundle = {
       scope: "Owned wrapper-exported CA files; not a child environment or trust-store observation",
-      actualOmpEnvironment: "Not exposed by the public process/session inspection used by this fixture",
+      actualProviderEnvironment: "Not exposed by public process/session inspection",
       candidateFiles: 0,
       readableFiles: 0,
       contentAddressMatches: 0,
@@ -495,21 +488,19 @@ async function smoke() {
     const rows = JSON.parse(raw.trim() || "[]");
     for (const row of rows) target.set(row.pid, row);
     assert.ok(
-      !rows.some((row) => /^kiro(?:-cli)?(?:\.exe)?$/i.test(row.name)),
-      "A forbidden Kiro CLI process was observed",
+      !rows.some((row) => /^(?:kiro(?:-cli)?|omp|claude(?:-code)?|codex|copilot|opencode|pi|bun|wezterm(?:-gui|-mux-server)?)(?:\.exe)?$/i.test(row.name)),
+      "A disallowed provider CLI or WezTerm process was observed",
     );
     const safeRows = rows.map(({ name, role, workingSet, privateBytes }) => ({
       process:
         role ||
         (/kiro-proxy/i.test(name)
           ? "native proxy"
-          : /^omp/i.test(name)
-            ? "OMP"
-            : /^cmd/i.test(name)
-              ? "command launcher"
-              : /chrome|msedge/i.test(name)
-                ? "approved browser"
-                : name),
+          : /^cmd/i.test(name)
+            ? "command launcher"
+            : /chrome|msedge/i.test(name)
+              ? "approved browser"
+              : name),
       workingSet,
       privateBytes,
     }));
@@ -557,10 +548,11 @@ async function smoke() {
   try {
     pristine = await inventory();
     const manifest = JSON.parse(await readFile(path.join(bundle, "bundle-manifest.json"), "utf8"));
-    assert.ok(
-      !manifest.files.some((entry) => /(?:^|\/)kiro(?:-cli)?\.exe$/i.test(entry.path)),
-      "Bundle must not contain Kiro CLI",
-    );
+    const disallowed = /(?:^|\/)(?:runtime\/(?:omp|wezterm|claude|codex|kiro-cli|bun)(?:\/|$)|(?:omp|wezterm|claude|kiro(?:-cli)?)(?:\.exe|\.cmd)$|node_modules\/(?:@oh-my-pi\/|@mariozechner\/pi-|@anthropic-ai\/claude|@openai\/codex))/i;
+    assert.ok(!manifest.files.some((entry) => disallowed.test(entry.path)),
+      "Bundle manifest contains a disallowed provider runtime");
+    assert.ok(!pristine.some(([name]) => disallowed.test(name)),
+      "Bundle inventory contains a disallowed provider runtime");
     const require = createRequire(path.join(bundle, "app/package.json"));
     const cliPackage = require.resolve("@getpaseo/cli/package.json");
     const cliMeta = JSON.parse(await readFile(cliPackage, "utf8"));
@@ -597,12 +589,8 @@ async function smoke() {
       return bytes;
     }
     report.phase = "ephemeral strict TLS fixture";
-    let openssl = path.join(bundle, "runtime/git/usr/bin/openssl.exe");
-    try {
-      await access(openssl);
-    } catch {
-      openssl = "openssl.exe";
-    }
+    const openssl = path.join(bundle, "runtime/git/usr/bin/openssl.exe");
+    await access(openssl);
     const ca = path.join(tlsDir, "ca.pem"),
       caKey = path.join(tlsDir, "ca.key");
     const leaf = path.join(tlsDir, "leaf.pem"),
@@ -678,7 +666,7 @@ async function smoke() {
       toolResultSeen = false,
       recoverySeen = false,
       searchResultSeen = false,
-      partialTextRetained = false,
+      provisionalTextDiscarded = false,
       conversationId,
       finalSent = false;
     const requestSequence = [];
@@ -701,7 +689,7 @@ async function smoke() {
     function completedResult(state, id) {
       const results = records(state, (item) => item.toolUseId === id && "status" in item);
       assert.equal(results.length, 1, "A completed tool result must occur exactly once in history");
-      assert.equal(results[0].status, "success", "Actual OMP tool result was not successful");
+      assert.equal(results[0].status, "success", "Actual native tool result was not successful");
       return results[0];
     }
     const connections = (report.connectionObservations = {
@@ -733,6 +721,13 @@ async function smoke() {
       async (request, response) => {
         try {
           const host = request.headers.host?.replace(/:443$/, "");
+          if (fixtureFailure) throw fixtureFailure;
+          (report.upstreamTimeline ??= []).push({
+            at: new Date().toISOString(),
+            role: serviceRole(host),
+            operation: request.headers["x-amz-target"] === "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+              ? "generation" : request.url.split("?")[0] === "/mcp" ? "search" : "management",
+          });
           const target = request.headers["x-amz-target"];
           const group = host === "management.us-east-1.kiro.dev"
             ? upstreamRequests.management
@@ -740,8 +735,7 @@ async function smoke() {
           if (group) {
             group.total++;
             const agent = request.headers["user-agent"] ?? "";
-            const client = /^Bun(?:[ /]|$)/i.test(agent) ? "Bun"
-              : /^(?:node|undici|Node\.js)(?:[ /]|$)/i.test(agent) ? "Node" : "other";
+            const client = /^(?:node|undici|Node\.js)(?:[ /]|$)/i.test(agent) ? "Node" : "other";
             group.clients[client]++;
             const operation = host === "management.us-east-1.kiro.dev"
               ? target === "KiroControlPlaneBearerService.ListAvailableModels" ? "catalog"
@@ -883,10 +877,10 @@ async function smoke() {
           assert.equal(
             new Set(offered.map((tool) => tool.name)).size,
             offered.length,
-            "OMP must not offer duplicate tools",
+            "Native provider must not offer duplicate tools",
           );
           const search = offered.find((tool) => tool.name === "web_search");
-          assert.ok(search?.inputSchema.json.properties.query, "Default OMP web_search was not offered");
+          assert.ok(search?.inputSchema.json.properties.query, "Native Kiro web_search was not offered");
           if (generations === 1) {
             beforeOutputFailureAt = performance.now();
             requestSequence.push("generation:503-before-output");
@@ -904,19 +898,15 @@ async function smoke() {
           if (generations === 2) {
             observeRetry("503-before-output", beforeOutputFailureAt);
             requestSequence.push("generation:write-tool");
-            await sample("real OMP pre-output retry recovered", daemon.child.pid);
-            const write = offered.find((tool) => tool.name === "write");
-            assert.ok(write, "Real OMP did not offer its write tool");
+            await sample("native provider pre-output retry recovered", daemon.child.pid);
+            const write = offered.find((tool) => tool.name === "write_file");
+            assert.ok(write, "Native provider did not offer write_file");
             const schema = write.inputSchema.json;
-            assert.ok(
-              schema.properties.path && schema.properties.content,
-              "Offered write schema must declare path and content",
-            );
+            assert.deepEqual(schema.required, ["path", "content"]);
+            assert.equal(schema.additionalProperties, false);
+            assert.ok(schema.properties.path && schema.properties.content,
+              "Native write_file schema must declare path and content");
             const input = { path: outputFile, content: fileText };
-            if (schema.properties.i) input.i = "Writing qualification fixture";
-            if (schema.properties.ikey) input.ikey = "portable-smoke-write";
-            for (const key of schema.required ?? [])
-              assert.ok(key in input, "Write tool declares an unsupported required field");
             response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
             response.end(frame("toolUseEvent", {
               toolUseId: toolId,
@@ -928,7 +918,7 @@ async function smoke() {
           }
           completedResult(state, toolId);
           assert.equal(
-            records(state, (item) => item.toolUseId === toolId && item.name === "write").length,
+            records(state, (item) => item.toolUseId === toolId && item.name === "write_file").length,
             1,
             "Recovery must retain exactly one completed write call",
           );
@@ -937,7 +927,7 @@ async function smoke() {
             assert.equal(
               await readFile(outputFile, "utf8"),
               fileText,
-              "Actual OMP tool did not create the exact file",
+              "Actual native write_file did not create the exact file",
             );
             toolResultSeen = true;
             await sample("real write result before transport disconnect", daemon.child.pid);
@@ -965,25 +955,20 @@ async function smoke() {
             observeRetry("partial-response-disconnect", partialFailureAt);
             requestSequence.push("generation:recovered-search-tool");
             recoverySeen = true;
-            partialTextRetained = JSON.stringify(state).includes(partialText);
-            assert.ok(
-              partialTextRetained,
-              "Recovery must resume committed partial text in history, not retry a fresh turn",
-            );
+            provisionalTextDiscarded = !JSON.stringify(state).includes(partialText);
+            assert.ok(provisionalTextDiscarded,
+              "Native onRestart must discard provisional text from the retried request history");
             response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
             response.end(frame("toolUseEvent", {
               toolUseId: searchToolId,
               name: search.name,
-              input: JSON.stringify({
-                query: searchQuery,
-                ...(search.inputSchema.json.properties.i ? { i: "Searching Kiro backend" } : {}),
-              }),
+              input: JSON.stringify({ query: searchQuery }),
               stop: true,
             }));
             return;
           }
           requestSequence.push("generation:final-with-citations");
-          assert.equal(searchRequests, 1, "The actual OMP search must reach Kiro MCP");
+          assert.equal(searchRequests, 1, "Actual native search must reach Kiro MCP");
           const result = completedResult(state, searchToolId);
           const resultText = JSON.stringify(result.content);
           for (const value of [
@@ -1013,11 +998,12 @@ async function smoke() {
           ]));
         } catch (error) {
           if (!fixtureFailure) {
+            report.firstFixtureFailureAt = new Date().toISOString();
             fixtureFailure = error;
             report.fixtureProgress = {
               generations, catalogs, searchRequests, requestSequence: [...requestSequence],
               retryCadence: [...retryCadence], toolResultSeen, recoverySeen,
-              searchResultSeen, partialTextRetained,
+              searchResultSeen, provisionalTextDiscarded,
             };
           }
           if (!response.headersSent) {
@@ -1149,10 +1135,10 @@ async function smoke() {
       "Import modified the source CLI credential database",
     );
     report.cliAuthImport = {
-      source: "original caller home, not isolated OMP home",
+      source: "original caller home, not isolated portable home",
       explicitDatabaseArgument: false,
       sourceDatabaseUnchanged: true,
-      destination: "private managed store used by the subsequent real OMP chain",
+      destination: "private managed store used by the subsequent native provider",
     };
     report.phase = "real model discovery through strict TLS proxy";
     currentConnections = connectionPhase("untrustedDiscovery");
@@ -1209,17 +1195,20 @@ async function smoke() {
     );
     const config = JSON.parse(await readFile(path.join(data, "paseo/config.json"), "utf8"));
     assert.deepEqual(
-      config.agents.providers["kiro-omp-http"].models.map((model) => model.id).sort(),
-      ["kiro-http/auto", "kiro-http/fixture-named"],
+      config.agents.providers["kiro-http"].models.map((model) => model.id).sort(),
+      ["auto", "fixture-named"],
     );
     assert.equal(
-      config.daemon.agentProfiles.find((profile) => profile.id === "kiro-omp-http").model,
-      "kiro-http/auto",
+      config.daemon.agentProfiles.find((profile) => profile.id === "kiro-http").model,
+      "auto",
     );
     assert.equal(
-      config.agents.providers["kiro-omp-http"].env.OMP_KIRO_MODEL_CATALOG_FILE,
+      config.agents.providers["kiro-http"].env.OMP_KIRO_MODEL_CATALOG_FILE,
       path.join(data, "models.json"),
     );
+    assert.equal(config.daemon.agentProfiles.find((profile) => profile.id === "kiro-http").modeId, "full");
+    assert.equal(config.agents.providers["kiro-http"].enabled, true);
+    assert.ok(!("kiro-omp-http" in config.agents.providers), "Obsolete profile must be absent");
     const catalogsBeforeColdStart = catalogs;
     assert.equal(catalogsBeforeColdStart, 1, "Only models.cmd may fetch catalog metadata before cold start");
     assert.notEqual(
@@ -1258,9 +1247,9 @@ async function smoke() {
       "Readiness must correspond to the wrapper-owned daemon",
     );
     await sample("daemon ready before agent", daemon.child.pid);
-    await recordOwnedOmpLogFailures(true);
+    await recordOwnedNativeLogFailures(true);
     currentConnections = connectionPhase("actualAgent");
-    report.phase = "actual Paseo OMP recovery, completed-tool replay protection and Kiro search";
+    report.phase = "actual native recovery, completed-tool replay protection and Kiro search";
     const prompt =
       `${promptMarker}: Execute the tools requested by the model to create the fixture file ` +
       "and search using default web_search, then report the final model response.";
@@ -1274,10 +1263,8 @@ async function smoke() {
           "agent",
           "run",
           prompt,
-          "--provider",
-          "kiro-omp-http",
           "--model",
-          "kiro-http/fixture-named",
+          "fixture-named",
           "--cwd",
           workspace,
           // No mode override: qualify the packaged default Full access policy.
@@ -1317,12 +1304,12 @@ async function smoke() {
     assert.equal(
       catalogs,
       catalogsBeforeColdStart,
-      "Cold OMP startup must use the account snapshot without live model discovery or a warm-up CLI",
+      "Cold native startup must use the account snapshot without live discovery or a warm-up CLI",
     );
     assert.equal(
       cliResult.provider,
-      "kiro-omp-http",
-      "Actual Paseo provider differs from OMP profile",
+      "kiro-http",
+      "Default Paseo provider must be the native Kiro HTTP profile",
     );
     const transcript = await checked(
       cmd("paseo", [
@@ -1341,10 +1328,14 @@ async function smoke() {
       transcript.includes("KIRO_PORTABLE_CHAIN_OK"),
       "Final fixture response did not reach the actual Paseo transcript",
     );
+    assert.ok(!transcript.includes(partialText),
+      "Native onRestart must replace provisional text rather than publish a duplicated interrupted response");
+    assert.equal(transcript.split("KIRO_PORTABLE_CHAIN_OK").length - 1, 1,
+      "Completed native response must be published exactly once");
     assert.ok(
       toolResultSeen && recoverySeen && searchResultSeen && finalSent &&
         generations === expectedGenerations,
-      "Actual OMP recovery and Kiro-only tool chain was not observed",
+      "Actual native recovery and Kiro-only tool chain was not observed",
     );
     assert.deepEqual(requestSequence, [
       "generation:503-before-output",
@@ -1353,14 +1344,10 @@ async function smoke() {
       "generation:recovered-search-tool",
       "mcp:web_search",
       "generation:final-with-citations",
-    ], "Actual bundled OMP must complete the full controlled recovery sequence");
+    ], "Actual native provider must complete the full controlled recovery sequence");
     assert.equal(await readFile(outputFile, "utf8"), guardedFileText);
     await delay(2000);
     const idle = await sample("completed agent after two seconds idle", daemon.child.pid);
-    assert.ok(
-      idle.some((row) => /^omp(?:\.exe)?$/i.test(row.name)),
-      "OMP child was not observed",
-    );
     assert.ok(
       idle.some((row) => /kiro-proxy/i.test(row.name)),
       "Native proxy child was not observed",
@@ -1372,7 +1359,7 @@ async function smoke() {
       generations,
       requestSequence,
       retryCadence,
-      requestedModel: "kiro-http/fixture-named",
+      requestedModel: "fixture-named",
       selectedModelEveryTurn: models,
       catalogRequests: catalogs,
       discoveredModels: catalog.models.map((model) => model.id),
@@ -1384,7 +1371,7 @@ async function smoke() {
         warmUpCli: false,
         liveDiscoveryRequests: catalogs - catalogsBeforeColdStart,
       },
-      realTools: ["write", "web_search"],
+      realTools: ["write_file", "web_search"],
       realToolResults: "success",
       recovery: {
         preOutputFailure: "HTTP 503 ServiceUnavailableException",
@@ -1392,14 +1379,15 @@ async function smoke() {
         originalRequestOccursOnceEveryAttempt: true,
         completedWriteCallAndResultOccurOnceInHistory: true,
         completedWriteNotReexecuted: "post-write sentinel survived recovery and final completion",
-        interruptedTextRetainedInRetryHistory: partialTextRetained,
+        provisionalTextDiscardedOnRestart: provisionalTextDiscarded,
+        noDuplicatePublishedText: true,
       },
       fileSHA256: createHash("sha256").update(guardedFileText).digest("hex"),
       finalResponseInPaseoTranscript: "KIRO_PORTABLE_CHAIN_OK",
-      noKiroCliInBundleOrObservedChildren: true,
+      noDisallowedProviderRuntimeInBundleOrObservedChildren: true,
     };
     report.webSearch = {
-      surface: "default OMP web_search called by controlled model",
+      surface: "native Kiro web_search called by controlled model",
       backend: "authenticated Kiro POST /mcp tools/call web_search through strict TLS proxy",
       requests: searchRequests,
       citationUrl: searchResult.results[0].url,
@@ -1446,76 +1434,6 @@ async function smoke() {
       used: sdkBalance.used,
       remaining: sdkBalance.remaining,
       requests: quotaRequests,
-    };
-
-    report.phase = "standalone OMP actual terminal surface";
-    const pty = require("node-pty");
-    let tuiOutput = "",
-      tuiExit;
-    tui = pty.spawn(
-      process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
-      `/d /s /c ""${path.join(bundle, "omp.cmd")}" --console --data-dir "${data}""`,
-      { name: "xterm-256color", cols: 100, rows: 30, cwd: workspace, env },
-    );
-    const tuiDone = new Promise((resolve) =>
-      tui.onExit((event) => {
-        tuiExit = event;
-        resolve(event);
-      }),
-    );
-    tui.onData((text) => {
-      tuiOutput = (tuiOutput + text).slice(-1024 * 1024);
-      if (text.includes("\x1b[6n")) tui.write("\x1b[1;1R");
-    });
-    await waitFor(
-      async () => {
-        if (tuiExit) {
-          recordCommandFailure("Standalone OMP TUI exited before readiness", {
-            code: tuiExit.exitCode,
-            stdout: tuiOutput,
-            stderr: "",
-          });
-          throw new Error("Standalone OMP exited before its terminal surface was ready");
-        }
-        const visible = tuiOutput.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-        return (
-          tuiOutput.includes("\x1b[") && /Fixture Auto|kiro-http\/auto|\bauto\b/i.test(visible)
-        );
-      },
-      "Standalone OMP TUI render",
-      60000,
-    );
-    await sample("standalone OMP terminal (separate launcher)", tui.pid, tuiOwned);
-    tui.write("\x04"); // Supported Ctrl+D shutdown with an empty editor.
-    const tuiResult = await Promise.race([
-      tuiDone,
-      delay(15000, undefined, { ref: false }).then(() => {
-        throw new Error("Standalone OMP did not handle terminal exit");
-      }),
-    ]);
-    assert.equal(tuiResult.exitCode, 0, "Standalone OMP terminal did not exit cleanly");
-    // A naturally exited ConPTY still owns node-pty's output worker until killed.
-    tui.kill();
-    await waitFor(
-      async () => !(await liveOwned(tuiOwned)).length,
-      "Standalone OMP proxy cleanup",
-      15000,
-    );
-    tui = undefined;
-    assert.equal(
-      generations,
-      expectedGenerations,
-      "Opening the terminal must not send an unsolicited generation",
-    );
-    assert.equal(searchRequests, 1, "Opening the terminal must not send an unsolicited search");
-    report.standaloneOmp = {
-      surface: "actual OMP TUI through Windows ConPTY and root omp.cmd --console",
-      selectedModelRendered: "kiro-http/auto",
-      terminalExit: "Ctrl+D",
-      cleanExit: true,
-      ownedProcessesRemaining: 0,
-      unsolicitedGenerations: 0,
-      wezTermGuiExercised: false,
     };
 
     report.phase = "approved browser bundled web UI";
@@ -1798,7 +1716,7 @@ async function smoke() {
     report.result = "passed";
     report.phase = "complete";
   } catch (error) {
-    await recordOwnedOmpLogFailures();
+    await recordOwnedNativeLogFailures();
     if (report.phase === "approved browser bundled web UI") {
       const messages = new Set([
         "Headless browser startup exceeded its deadline",
@@ -1853,9 +1771,6 @@ async function smoke() {
     process.exitCode = 1;
   } finally {
     fixtureFailure = undefined;
-    try {
-      tui?.kill();
-    } catch {}
     if (browser?.child.exitCode === null) {
       try {
         await sample("browser cleanup ownership capture", browser.child.pid, browserOwned);
@@ -1877,7 +1792,7 @@ async function smoke() {
     }
     // Stop only exact, previously observed owned identities. PID reuse is checked
     // by process creation time; no image-name/global taskkill is ever used.
-    for (const target of [browserOwned, tuiOwned, knownOwned]) {
+    for (const target of [browserOwned, knownOwned]) {
       try {
         const entries = [...target.values()]
           .map((row) => `@{id=${row.pid};created='${row.created}'}`)
@@ -1902,8 +1817,7 @@ async function smoke() {
       await waitFor(
         async () =>
           !(await liveOwned(knownOwned)).length &&
-          !(await liveOwned(browserOwned)).length &&
-          !(await liveOwned(tuiOwned)).length,
+          !(await liveOwned(browserOwned)).length,
         "Final fixture process cleanup",
         15000,
       );
@@ -1914,7 +1828,11 @@ async function smoke() {
       report.result = "failed";
       process.exitCode = 1;
     }
-    await writeFile(path.join(evidence, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+    report.finishedAt = new Date().toISOString();
+    const reportFile = path.join(evidence, "report.json");
+    const reportTemporary = `${reportFile}.${randomBytes(8).toString("hex")}.tmp`;
+    await writeFile(reportTemporary, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
+    await rename(reportTemporary, reportFile);
     console.log(
       JSON.stringify({
         result: report.result,

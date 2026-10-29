@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// Real pinned Paseo daemon, SDK, WebSocket transport and OMP adapter. Only the
-// OMP RPC runtime is deterministic: this does not qualify real model generation.
+// Real pinned Paseo daemon, SDK, plugin bridge, native Kiro provider and HTTP
+// transport. Only the loopback Kiro backend is controlled; no cloud generation.
 // Run with the package's Node (SQLite support required):
 // node test/paseo-reconnect.mjs [--app /path/to/portable/app]
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -22,30 +22,32 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--app"), "Expected [--app PATH]");
-const app = path.resolve(args[1] ?? path.join(root, "payload/app"));
+const app = path.resolve(args[1] ?? (process.env.KIRO_TEST_BUNDLE_ROOT
+  ? path.join(process.env.KIRO_TEST_BUNDLE_ROOT, "app") : path.join(root, "payload/app")));
 const scratch = await mkdtemp(path.join(os.tmpdir(), "paseo-reconnect-"));
 const home = path.join(scratch, "home");
 const workspace = path.join(scratch, "workspace");
 await Promise.all([mkdir(home), mkdir(workspace)]);
-// Set before importing the server; no user config, OMP state or running daemon.
+// Set before importing the server; no user config or running daemon is selected.
 const isolatedEnvironment = {
   HOME: home, USERPROFILE: home, PASEO_HOME: path.join(home, "paseo"),
   XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"),
-  XDG_CACHE_HOME: path.join(home, "cache"), PI_CODING_AGENT_DIR: path.join(home, "omp"),
+  XDG_CACHE_HOME: path.join(home, "cache"),
   APPDATA: path.join(home, "roaming"), LOCALAPPDATA: path.join(home, "local"),
 };
+for (const key of Object.keys(process.env))
+  if (/^(?:PASEO_|OMP_|PI_|KIRO_|BUN_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$|NODE_OPTIONS$)/i.test(key))
+    delete process.env[key];
 Object.assign(process.env, isolatedEnvironment);
 const require = createRequire(path.join(app, "package.json"));
-const serverRoot = path.dirname(require.resolve("@getpaseo/server"));
 const clientEntry = require.resolve("@getpaseo/client/internal/daemon-client");
 const serverEntry = require.resolve("@getpaseo/server");
-const adapterEntry = path.join(serverRoot, "agent/providers/omp/agent.js");
+const providerEntry = path.join(app, "plugin/omp-kiro/server/provider.mjs");
 const { WebSocket, WebSocketServer } = require("ws");
 const pino = require("pino");
 const logger = pino({ level: "silent" });
-const [{ createPaseoDaemon }, { DaemonClient }, { OmpAgentClient }] = await Promise.all([
+const [{ createPaseoDaemon }, { DaemonClient }] = await Promise.all([
   import(pathToFileURL(serverEntry).href), import(pathToFileURL(clientEntry).href),
-  import(pathToFileURL(adapterEntry).href),
 ]);
 const versions = {};
 for (const name of ["server", "client"]) {
@@ -55,11 +57,12 @@ for (const name of ["server", "client"]) {
 }
 const digest = async (file) => createHash("sha256").update(await readFile(file)).digest("hex");
 const report = {
+  startedAt: new Date().toISOString(),
   qualification: "Paseo observation reconnect; no prompt replay",
-  engine: "controlled injected OMP RPC runtime; real published OMP adapter, daemon and SDK",
-  notQualified: ["real OMP subprocess/model generation", "browser rendering", "cloud/provider stream resume"],
+  engine: "real native Kiro HTTP provider and transport, plugin bridge, daemon and SDK; controlled loopback backend",
+  notQualified: ["cloud model generation", "browser rendering", "cloud/provider stream resume", "production authentication (qualified separately by Windows ZIP smoke)"],
   versions, node: process.version, platform: process.platform,
-  inputs: { client: await digest(clientEntry), ompAdapter: await digest(adapterEntry) },
+  inputs: { client: await digest(clientEntry), nativeProvider: await digest(providerEntry) },
   scenarios: [],
 };
 // Execute only the exact shipped queue-send function, not the browser bundle
@@ -168,83 +171,111 @@ async function until(predicate, label, maximum = 10000) {
   await bounded((async () => {
     while (!predicate()) {
       assert.ok(Date.now() < deadline, "Reconnect qualification deadline");
+      if (backendFailure) throw backendFailure;
       await delay(20);
     }
   })(), label, maximum);
 }
 
-// This fixture owns the runtime seam and the sole external-effect counter.
-// Unexpected adapter calls fail rather than pretending to implement RPC methods.
-const model = { provider: "fixture", id: "selected", name: "Selected fixture model", input: ["text"], contextWindow: 32768, maxTokens: 1024 };
-const runtimes = [];
-let promptCalls = 0, toolExecutions = 0, abortCalls = 0;
-const runtime = {
-  async startSession(input) {
-    assert.equal(input.cwd === workspace || input.cwd === home, true);
-    const listeners = new Set();
-    const messages = [];
-    const state = { sessionId: randomUUID(), model, thinkingLevel: "off", isStreaming: false,
-      isCompacting: false, messageCount: 0, queuedMessageCount: 0 };
-    const session = {
-      input, state, closed: false, messages, pending: null, promptCalls: 0, toolExecutions: 0,
-      environment: { ...isolatedEnvironment },
-      onEvent(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-      emit(event) { for (const fn of listeners) fn(event); },
-      async prompt({ message }) {
-        assert.equal(session.closed, false);
-        assert.equal(state.isStreaming, false, "A prompt was replayed into the active turn");
-        promptCalls++;
-        session.promptCalls++;
-        state.isStreaming = true;
-        const user = { role: "user", content: message, id: randomUUID(), timestamp: Date.now() };
-        messages.push(user);
-        session.pending = { message, user };
-        // Adapter creates its turn before awaiting this RPC acknowledgement.
-        queueMicrotask(() => {
-          session.emit({ type: "agent_start" });
-          session.emit({ type: "turn_start" });
-          session.emit({ type: "message_end", message: user });
-        });
-        return { requestId: randomUUID(), agentInvoked: true };
-      },
-      async finishOffline(marker) {
-        assert.ok(session.pending, "Missing pending runtime turn");
-        const toolCallId = randomUUID();
-        const file = path.join(workspace, `${marker}.txt`);
-        session.emit({ type: "tool_execution_start", toolCallId, toolName: "write", args: { path: file, content: marker } });
-        // Real local effect, deliberately after loss of observation. A replay
-        // would increment both the runtime prompt and external-effect counts.
-        await writeFile(file, marker, { flag: "wx" });
-        toolExecutions++;
-        session.toolExecutions++;
-        session.emit({ type: "tool_execution_end", toolCallId, toolName: "write", result: { content: [{ type: "text", text: "written" }] }, isError: false });
-        const assistant = { role: "assistant", provider: model.provider, model: model.id,
-          responseId: randomUUID(), content: [{ type: "text", text: marker }], stopReason: "stop", timestamp: Date.now() };
-        session.emit({ type: "message_start", message: assistant });
-        session.emit({ type: "message_update", message: assistant, assistantMessageEvent: { type: "text_delta", delta: marker } });
-        session.emit({ type: "message_end", message: assistant });
-        messages.push(assistant);
-        state.isStreaming = false;
-        state.messageCount = messages.length;
-        session.pending = null;
-        session.emit({ type: "agent_end", messages: [assistant] });
-        assert.equal(await readFile(file, "utf8"), marker);
-        return toolCallId;
-      },
-      async getState() { return { ...state }; },
-      async getMessages() { return [...messages]; },
-      async getAvailableModels() { return [model]; },
-      async getSessionStats() { return { tokens: { input: 1, output: 1 } }; },
-      async getCommands() { return []; },
-      async getBranchMessages() { return messages.filter((m) => m.role === "user").map((m) => ({ entryId: m.id, text: m.content })); },
-      async setSubagentSubscription() {},
-      async abort() { abortCalls++; state.isStreaming = false; },
-      async close() { session.closed = true; listeners.clear(); },
-    };
-    runtimes.push(session);
-    return session;
-  },
-};
+// A real HTTP backend holds the initial response while SDK observation is down.
+// It requests the real native write_file tool; only that tool creates the file.
+const backendSessions = new Map();
+let promptCalls = 0, toolExecutions = 0, backendFailure;
+const { crc32 } = await import(pathToFileURL(path.join(app, "plugin/omp-kiro/server/eventstream.mjs")));
+function eventFrame(type, value) {
+  const headers = Buffer.concat(Object.entries({ ":message-type": "event", ":event-type": type }).map(([name, value]) => {
+    const key = Buffer.from(name), text = Buffer.from(value), bytes = Buffer.alloc(key.length + 4);
+    bytes[0] = key.length; key.copy(bytes, 1); bytes[1 + key.length] = 7;
+    bytes.writeUInt16BE(text.length, key.length + 2);
+    return Buffer.concat([bytes, text]);
+  }));
+  const payload = Buffer.from(JSON.stringify(value));
+  const bytes = Buffer.alloc(16 + headers.length + payload.length);
+  bytes.writeUInt32BE(bytes.length, 0); bytes.writeUInt32BE(headers.length, 4);
+  bytes.writeUInt32BE(crc32(bytes.subarray(0, 8)), 8);
+  headers.copy(bytes, 12); payload.copy(bytes, 12 + headers.length);
+  bytes.writeUInt32BE(crc32(bytes.subarray(0, -4)), bytes.length - 4);
+  return bytes;
+}
+const backend = createServer(async (request, response) => {
+  try {
+    assert.equal(request.method, "POST");
+    let raw = "";
+    for await (const bytes of request) { raw += bytes; assert.ok(raw.length < 1024 * 1024); }
+    const body = JSON.parse(raw);
+    if (request.headers["x-amz-target"] === "KiroControlPlaneBearerService.ListAvailableModels") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ models: [{ modelId: "fixture-named", modelName: "Fixture Named", tokenLimits: { maxInputTokens: 32768, maxOutputTokens: 1024 } }] }));
+      return;
+    }
+    assert.equal(request.headers["x-amz-target"], "AmazonCodeWhispererStreamingService.GenerateAssistantResponse");
+    const state = body.conversationState;
+    const current = state.currentMessage.userInputMessage;
+    assert.equal(current.modelId, "fixture-named");
+    const marker = JSON.stringify(state).match(/RECONNECT_(?:ACCEPTED_BEFORE_DROP|ACKNOWLEDGEMENT_LOST)/)?.[0];
+    assert.ok(marker, "Missing original reconnect prompt");
+    let session = backendSessions.get(marker);
+    if (!session) {
+      promptCalls++;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      session = { marker, conversationId: state.conversationId, requests: 0, promptCalls: 1,
+        toolExecutions: 0, toolCallId: `write-${marker}`, release, gate };
+      backendSessions.set(marker, session);
+    }
+    assert.equal(state.conversationId, session.conversationId, "Observation reconnect changed the native conversation");
+    session.requests++;
+    assert.ok(session.requests <= 2, "Native backend received a replayed prompt or completed tool");
+    if (session.requests === 1) {
+      const tools = current.userInputMessageContext.tools.map((tool) => tool.toolSpecification);
+      const write = tools.find((tool) => tool.name === "write_file");
+      assert.ok(write);
+      assert.deepEqual(write.inputSchema.json.required, ["path", "content"]);
+      await session.gate;
+      response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+      response.end(eventFrame("toolUseEvent", { toolUseId: session.toolCallId, name: "write_file",
+        input: JSON.stringify({ path: `${marker}.txt`, content: marker }), stop: true }));
+    } else {
+      assert.equal(await readFile(path.join(workspace, `${marker}.txt`), "utf8"), marker);
+      const results = current.userInputMessageContext.toolResults;
+      assert.equal(results.filter((result) => result.toolUseId === session.toolCallId && result.status === "success").length, 1);
+      session.toolExecutions++; toolExecutions++;
+      response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
+      response.end(eventFrame("assistantResponseEvent", { content: marker }));
+    }
+  } catch (error) {
+    backendFailure ??= error;
+    if (!response.headersSent) response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ __type: "ValidationException", message: "Controlled reconnect fixture invariant failed" }));
+    else response.destroy();
+  }
+});
+await new Promise((resolve, reject) => { backend.once("error", reject); backend.listen(0, "127.0.0.1", resolve); });
+const fixturePlugin = path.join(scratch, "native-fixture-plugin");
+await mkdir(fixturePlugin);
+await mkdir(path.join(fixturePlugin, "node_modules"));
+await symlink(path.join(app, "plugin/omp-kiro"), path.join(fixturePlugin, "node_modules/omp-kiro"),
+  process.platform === "win32" ? "junction" : "dir");
+async function publishFixtureFile(file, value) {
+  await writeFile(`${file}.tmp`, value, { flag: "wx" });
+  await rename(`${file}.tmp`, file);
+}
+await publishFixtureFile(path.join(fixturePlugin, "paseo-plugin.json"), JSON.stringify({
+  id: "native-reconnect-fixture", name: "Native reconnect backend qualification", requirements: { paseo: ">=0.13.0" },
+}));
+await publishFixtureFile(path.join(fixturePlugin, "index.server.ts"), `
+import { createKiroHttpProvider } from "omp-kiro/server/provider.mjs";
+export default function contribute(server) {
+  server.registerProvider(createKiroHttpProvider({
+    stateDir: ${JSON.stringify(path.join(home, "native-sessions"))},
+    authProvider: async () => ({ kind: "social", provider: "google", access_token: "controlled-loopback-token", expires_at: "2099-01-01T00:00:00.000Z", region: "us-east-1" }),
+    fetchImpl: async (url, init) => {
+      const target = new URL(url);
+      if (!["runtime.us-east-1.kiro.dev", "management.us-east-1.kiro.dev"].includes(target.hostname)) throw new Error("Non-Kiro fixture destination");
+      return fetch("http://127.0.0.1:${backend.address().port}/", { ...init, redirect: "error" });
+    },
+  }));
+}
+`);
 
 let daemon, proxy;
 const scenarios = [];
@@ -260,16 +291,17 @@ function drop() {
   for (const pair of pairs) { pair.browser.terminate(); pair.upstream.terminate(); }
 }
 try {
-  const provider = new OmpAgentClient({ logger, runtime, runtimeSettings: { command: { mode: "replace", argv: [process.execPath] } } });
   daemon = await bounded(createPaseoDaemon({
     listen: "127.0.0.1:0", paseoHome: process.env.PASEO_HOME,
     corsAllowedOrigins: [], staticDir: workspace, mcpDebug: false,
-    agentClients: { omp: provider }, providerOverrides: { omp: { enabled: true } },
+    agentClients: {}, providerOverrides: { "kiro-http": { enabled: true } },
     agentStoragePath: path.join(home, "agents"),
     relayEnabled: false, pluginsEnabled: false, mcpEnabled: false,
     browserToolsEnabled: false, enableTerminalAgentHooks: false,
     webUi: { enabled: false, distDir: null }, metadataGeneration: { providers: [] },
-  }, logger), "daemon creation");
+  }, logger, { builtinPlugins: { async load(start) {
+    await start({ id: "native-reconnect-fixture", directory: fixturePlugin });
+  } } }), "daemon creation");
   await bounded(daemon.start(), "daemon start");
   const target = daemon.getListenTarget();
   assert.equal(target.type, "tcp");
@@ -334,7 +366,7 @@ try {
     });
     client.subscribeConnectionStatus((event) => state.connectionStates.push({ ...event, at: Date.now() }));
     await bounded(client.connect(), "initial SDK connection");
-    const agent = state.agent = await bounded(client.createAgent({ provider: "omp", cwd: workspace, model: "fixture/selected", title: kind }), "agent creation");
+    const agent = state.agent = await bounded(client.createAgent({ provider: "kiro-http", cwd: workspace, model: "fixture-named", title: kind }), "native agent creation");
     state.directory = client.observeAgents();
     state.directory.subscribe({ snapshot: (snapshot) => state.directorySnapshots.push(snapshot), update() {}, error(error) { proxyError = error; } });
     await bounded(state.directory.ready, "directory observation");
@@ -366,25 +398,27 @@ try {
       state.outcome = sendQueued(state.queuedInput).then((result) => { state.queuedResult = result; });
     }
   }
-  await until(() => offline && scenarios.every(({ client }) => !client.isConnected) && promptCalls === 2, "disconnect and runtime prompts");
+  await until(() => offline && scenarios.every(({ client }) => !client.isConnected) && promptCalls === 2, "disconnect and native backend requests");
   for (const state of scenarios) {
     const active = daemon.agentManager.getAgent(state.agent.id);
     assert.equal(active.lifecycle, "running");
     state.turnId = active.activeTurnId;
     assert.ok(state.turnId);
-    state.runtimeSession = runtimes.find((session) => session.pending?.message.includes(state.marker));
-    assert.ok(state.runtimeSession);
-    assert.equal(state.runtimeSession.input.model, "fixture/selected");
-    state.sessionId = state.runtimeSession.state.sessionId;
+    state.backendSession = backendSessions.get(state.marker);
+    assert.ok(state.backendSession);
+    state.sessionId = state.backendSession.conversationId;
+    assert.ok(state.sessionId);
   }
   // Both SDKs must actually try at 30s while offline, then schedule the same
   // delay again. No fake clock, reduced production delay, or mutation replay.
   await until(() => scenarios.every(({ kind }) => upgradeEvents.some((event) => event.kind === kind && !event.accepted)), "real 30-second rejected reconnects", 35000);
   for (const state of scenarios) {
     assert.equal(daemon.agentManager.getAgent(state.agent.id).activeTurnId, state.turnId);
-    assert.equal(state.runtimeSession.closed, false);
-    state.toolCallId = await bounded(state.runtimeSession.finishOffline(state.marker), "offline tool and completion");
+    state.toolCallId = state.backendSession.toolCallId;
+    state.backendSession.release();
     await until(() => daemon.agentManager.getAgent(state.agent.id).lifecycle === "idle", "active turn completes offline");
+    state.guardedText = `${state.marker}\nRECONNECT_SENTINEL_MUST_SURVIVE`;
+    await writeFile(path.join(workspace, `${state.marker}.txt`), state.guardedText);
     state.liveCountBeforeReconnect = state.timelineSignals.length;
   }
   offline = false;
@@ -392,7 +426,7 @@ try {
     state.timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length > state.restoredBefore &&
     state.directorySnapshots.length > state.directoryBefore), "real 30-second retry and resubscription", 35000);
   for (const state of scenarios) {
-    const { client, agent, before, runtimeSession, kind } = state;
+    const { client, agent, before, backendSession, kind } = state;
     const catchUp = await bounded(client.fetchAgentTimeline(agent.id, {
       direction: before.endCursor ? "after" : "tail", ...(before.endCursor ? { cursor: before.endCursor } : {}),
       projection: "canonical", limit: 100,
@@ -402,21 +436,25 @@ try {
     assert.ok(catchUp.entries.some((entry) => entry.item.type === "assistant_message" && entry.item.text.includes(state.marker) && entry.turnId === state.turnId));
     assert.ok(catchUp.entries.some((entry) => entry.item.type === "tool_call" && entry.turnId === state.turnId), "Offline tool is missing from recovered history");
     const full = await bounded(client.fetchAgentTimeline(agent.id, { direction: "tail", projection: "canonical", limit: 100 }), "complete history");
+    assert.equal(full.entries.filter((entry) => entry.item.type === "tool_call" &&
+      entry.item.name === "write_file" && entry.item.status === "completed" &&
+      entry.turnId === state.turnId).length, 1, "Native completed tool must occur exactly once");
     const users = full.entries.filter((entry) => entry.item.type === "user_message" && entry.item.clientMessageId === state.clientMessageId);
     assert.equal(users.length, 1, "Prompt was lost or duplicated in canonical history");
-    assert.equal(runtimeSession.promptCalls, 1);
+    assert.equal(backendSession.promptCalls, 1);
     assert.equal(frameCounts.get(kind), 1, "SDK replayed a mutation after transport loss");
-    assert.equal(runtimeSession.toolExecutions, 1);
-    assert.equal(abortCalls, 0, "Observation disconnect canceled the OMP turn");
-    assert.equal(runtimeSession.state.sessionId, state.sessionId);
-    assert.equal(runtimeSession.closed, false);
+    assert.equal(backendSession.toolExecutions, 1);
+    assert.equal(backendSession.requests, 2, "Observation reconnect replayed native generation");
+    assert.equal(backendSession.conversationId, state.sessionId);
+    assert.equal(await readFile(path.join(workspace, `${state.marker}.txt`), "utf8"), state.guardedText,
+      "Observation reconnect repeated the completed native write side effect");
     if (kind === "acknowledgement-lost") {
       await bounded(state.outcome, "ambiguous submission outcome");
       assert.deepEqual(state.delivery, { accepted: false, code: "DAEMON_CONNECTION_LOST", outcome: "unknown" });
       assert.equal(state.queuedResult.deliveryOutcome, "unknown");
       assert.equal(state.queued.get(agent.id).length, 0);
       assert.equal((await sendQueued(state.queuedInput)).status, "missing");
-      assert.equal(runtimeSession.promptCalls, 1);
+      assert.equal(backendSession.promptCalls, 1);
       assert.equal(frameCounts.get(kind), 1);
     }
     const reconnects = state.connectionStates.filter((event) => event.status === "disconnected" && event.nextRetryAt);
@@ -432,8 +470,8 @@ try {
     report.scenarios.push({
       kind, agentId: agent.id, turnId: state.turnId, sessionId: state.sessionId,
       clientMessageId: state.clientMessageId, toolCallId: state.toolCallId,
-      promptFrames: frameCounts.get(kind), runtimePrompts: runtimeSession.promptCalls,
-      toolExecutions: runtimeSession.toolExecutions, rejectedReconnects: upgrades.filter((event) => !event.accepted).length,
+      promptFrames: frameCounts.get(kind), nativePrompts: backendSession.promptCalls,
+      toolExecutions: backendSession.toolExecutions, rejectedReconnects: upgrades.filter((event) => !event.accepted).length,
       delivery: state.delivery, recoveredEntries: catchUp.entries.length, recoveredUserCopies: users.length,
       restoredSubscriptions: state.timelineSignals.filter((m) => m.type === "agent.timeline.subscription_restored").length - state.restoredBefore,
       directorySnapshots: state.directorySnapshots.length - state.directoryBefore,
@@ -442,6 +480,7 @@ try {
     });
   }
   assert.ifError(proxyError);
+  assert.ifError(backendFailure);
   assert.equal(hiddenAcknowledgements, 1);
   assert.equal(promptCalls, 2);
   assert.equal(promptFrames, 2);
@@ -467,6 +506,16 @@ try {
   })));
   report.elapsedMs = Date.now() - startedAt;
   report.result = "passed";
+} catch (error) {
+  report.result = "failed";
+  report.failure = {
+    at: new Date().toISOString(),
+    type: error?.name ?? "Error",
+    assertion: error?.code === "ERR_ASSERTION"
+      ? String(error.message).split("\n")[0].replaceAll(app, "[app]").replaceAll(scratch, "[fixture]")
+      : "Native reconnect qualification failed; private runtime output is not exported",
+  };
+  process.exitCode = 1;
 } finally {
   // No process.exit: leaked fixture handles remain qualification failures.
   // close() invalidates subscriptions before release, even on a broken socket.
@@ -480,6 +529,10 @@ try {
   await new Promise((resolve) => wss.close(resolve));
   if (proxy) await new Promise((resolve) => proxy.close(resolve));
   if (daemon) await daemon.stop();
+  for (const session of backendSessions.values()) session.release();
+  backend.closeAllConnections();
+  await new Promise((resolve) => backend.close(resolve));
   await rm(scratch, { recursive: true, force: true });
 }
+report.finishedAt = new Date().toISOString();
 console.log(JSON.stringify(report, null, 2));

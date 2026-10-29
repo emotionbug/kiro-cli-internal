@@ -15,14 +15,15 @@ on:
 permissions:
   contents: read
 
+env:
+  BUNDLE_NAME: kiro-paseo-http-0.5.0-windows-x64
+  npm_config_audit: "false"
+  npm_config_fund: "false"
+
 jobs:
-  windows:
+  build:
     runs-on: windows-2022
-    timeout-minutes: 50
-    env:
-      BUNDLE_NAME: kiro-paseo-omp-http-0.4.0-windows-x64
-      npm_config_audit: "false"
-      npm_config_fund: "false"
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,15 +38,45 @@ jobs:
         with:
           path: .work/download-cache
           key: windows-portable-${{ hashFiles('build/inputs.json', 'payload/app/package-lock.json') }}
-      - name: Assemble pinned native Windows distribution
+          restore-keys: windows-portable-
+      - name: Assemble pinned direct-only Windows distribution
         shell: pwsh
         run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-windows-built
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}.zip
+            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}.zip.sha256
+            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
+
+  qualify:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-windows-built
+          path: ${{ runner.temp }}/built
       - name: Extract the actual ZIP into a fresh Unicode path
         id: extract
         shell: pwsh
         run: |
           $extracted = "$env:RUNNER_TEMP\Kiro package 설치"
-          [System.IO.Compression.ZipFile]::ExtractToDirectory("$env:RUNNER_TEMP\$env:BUNDLE_NAME.zip", $extracted)
+          [System.IO.Compression.ZipFile]::ExtractToDirectory("$env:RUNNER_TEMP\built\$env:BUNDLE_NAME.zip", $extracted)
           "QUALIFIED_BUNDLE_ROOT=$extracted" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify proxy and private-state invariants
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
@@ -60,7 +91,7 @@ jobs:
       - name: Exercise offline Python, ripgrep and jq utilities
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
-        run: node test/windows-utilities.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
+        run: node test/windows-utilities.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\built\qualification"
       - name: Exercise Paseo observation reconnect without prompt replay
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
@@ -68,21 +99,12 @@ jobs:
           $node = "$env:QUALIFIED_BUNDLE_ROOT\runtime\node\node.exe"
           $report = & $node test/paseo-reconnect.mjs --app "$env:QUALIFIED_BUNDLE_ROOT\app"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\qualification") | Out-Null
-          $report | Out-File -FilePath "$env:RUNNER_TEMP\qualification\reconnect.json" -Encoding utf8
-      - name: Exercise cancellable offline OMP startup readiness
+          [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\built\qualification") | Out-Null
+          $report | Out-File -FilePath "$env:RUNNER_TEMP\built\qualification\reconnect.json" -Encoding utf8
+      - name: Exercise direct HTTP agent, actual web UI and owned cleanup
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh
-        run: |
-          $node = "$env:QUALIFIED_BUNDLE_ROOT\runtime\node\node.exe"
-          $report = & $node test/paseo-startup.mjs --app "$env:QUALIFIED_BUNDLE_ROOT\app"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\qualification") | Out-Null
-          $report | Out-File -FilePath "$env:RUNNER_TEMP\qualification\startup.json" -Encoding utf8
-      - name: Exercise offline install, actual web UI and OMP tool execution
-        if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
-        shell: pwsh
-        run: node test/windows-smoke.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\qualification"
+        run: node test/windows-smoke.mjs "$env:QUALIFIED_BUNDLE_ROOT" "$env:RUNNER_TEMP\built\qualification"
       - name: Retain qualified ZIP and safe evidence
         uses: actions/upload-artifact@v4
         with:
@@ -91,10 +113,10 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}.zip
-            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}.zip.sha256
-            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
-            ${{ runner.temp }}/qualification/
+            ${{ runner.temp }}/built/${{ env.BUNDLE_NAME }}.zip
+            ${{ runner.temp }}/built/${{ env.BUNDLE_NAME }}.zip.sha256
+            ${{ runner.temp }}/built/${{ env.BUNDLE_NAME }}/bundle-manifest.json
+            ${{ runner.temp }}/built/qualification/
       - name: Retain safe qualification diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,9 +126,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           path: |
-            ${{ runner.temp }}/${{ env.BUNDLE_NAME }}/bundle-manifest.json
-            ${{ runner.temp }}/qualification/reconnect.json
-            ${{ runner.temp }}/qualification/startup.json
-            ${{ runner.temp }}/qualification/report.json
-            ${{ runner.temp }}/qualification/utilities.json
-            ${{ runner.temp }}/qualification/web-ui.png
+            ${{ runner.temp }}/built/${{ env.BUNDLE_NAME }}/bundle-manifest.json
+            ${{ runner.temp }}/built/qualification/reconnect.json
+            ${{ runner.temp }}/built/qualification/report.json
+            ${{ runner.temp }}/built/qualification/utilities.json
+            ${{ runner.temp }}/built/qualification/web-ui.png

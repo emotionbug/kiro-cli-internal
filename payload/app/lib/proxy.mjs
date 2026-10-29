@@ -3,7 +3,6 @@ import { access, readFile, mkdir, writeFile, open, rename, rm } from "node:fs/pr
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import http from "node:http";
-import { getCACertificates } from "node:tls";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
 
 const libDir = fileURLToPath(new URL(".", import.meta.url));
@@ -110,10 +109,9 @@ export async function startProxy({ bundleRoot, dataDir, config = {}, env = proce
       throw new Error("network.caFile must contain valid PEM certificates.");
     }
   }
-  // Bun does not execute Node's --use-system-ca preloader. Export public system
-  // roots plus canonical X.509 certificates, never raw CA-file payload/comments.
-  const pem =
-    process.platform === "win32" ? getCACertificates("system").join("\n") + "\n" + extra : extra;
+  // Node loads Windows roots through --use-system-ca. Only additional public
+  // certificates need an immutable export; never copy raw payload/comments.
+  const pem = extra;
   if (pem.includes("-----BEGIN CERTIFICATE-----")) {
     const caDir = join(dataDir, "proxy");
     await mkdir(caDir, { recursive: true });

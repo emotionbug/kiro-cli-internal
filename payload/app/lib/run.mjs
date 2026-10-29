@@ -11,14 +11,11 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { startProxy, validateNetwork } from "./proxy.mjs";
 import {
-  accountOmpArgs,
   bundleRoot,
   command,
   configurePaseo,
-  ensureOmpSettings,
   initialize,
   json,
-  ompArgs,
   pluginPin,
   pluginRoot,
   runtimeEnv,
@@ -26,17 +23,15 @@ import {
 } from "./state.mjs";
 
 const node = path.join(bundleRoot, "runtime/node/node.exe");
-const omp = path.join(bundleRoot, "runtime/omp/omp.exe");
 const supervisor = path.join(
   bundleRoot,
   "app/node_modules/@getpaseo/server/dist/scripts/supervisor-entrypoint.js",
 );
 const cli = path.join(bundleRoot, "app/node_modules/@getpaseo/cli/dist/index.js");
-const usage = `Kiro Internal: offline-installed Paseo -> OMP -> Kiro HTTP
+const usage = `Kiro Internal: offline-installed Paseo -> Kiro HTTP
 
 start.cmd                 Start isolated loopback Paseo and open its web UI
 setup.cmd                 Set private state, plugin consent and Paseo password
-omp.cmd [--console] -- ... Run OMP directly (no Paseo daemon required)
 auth.cmd login [options]  Managed Google/GitHub/Builder ID/Identity Center login
 auth.cmd status|logout    Local status/logout, no network required
 models.cmd                Refresh account model metadata and this daemon's catalog
@@ -74,7 +69,6 @@ export function argumentsFor(argv) {
         "--accept-plugin-code",
         "--password-stdin",
         "--no-browser",
-        "--console",
         "--verify-all",
       ].includes(value)
     )
@@ -85,9 +79,12 @@ export function argumentsFor(argv) {
     throw new Error("--data-dir must be absolute.");
   if (
     flags.port &&
-    (!/^\d+$/.test(flags.port) || Number(flags.port) < 1024 || Number(flags.port) > 65535)
+    (!/^\d+$/.test(flags.port) ||
+      Number(flags.port) < 1024 ||
+      Number(flags.port) > 65535 ||
+      Number(flags.port) === 6767)
   )
-    throw new Error("--port must be 1024..65535.");
+    throw new Error("--port must be 1024..65535, excluding the main Paseo port 6767.");
   return { action, flags, rest };
 }
 async function trust(state, flags) {
@@ -281,13 +278,12 @@ async function refreshModels(state, env) {
     env,
     { relaySignals: true },
   );
-  if (code) return code;
   const existing = await json(path.join(state.home, "config.json"));
   if (existing) {
     await configurePaseo(state);
     await reload(state, env);
   }
-  return 0;
+  return code;
 }
 async function openBrowser(url) {
   if (process.platform !== "win32") {
@@ -339,7 +335,6 @@ async function start(state, flags) {
     await save(state.configFile, state.config);
   }
   await configurePaseo(state, { passwordHash, port });
-  await ensureOmpSettings(state);
   return transport(state, async (env, proxy) => {
     console.log(proxy.diagnostic);
     const controller = new AbortController();
@@ -391,7 +386,7 @@ async function start(state, flags) {
           acquired = instance;
           const url = `http://${instance.listen}`;
           console.log(
-            `Paseo -> OMP -> Kiro HTTP ready: ${url}\nKeep this window open. stop.cmd stops only this private daemon.\nUse auth.cmd login then models.cmd if the account model list is empty.`,
+            `Paseo -> Kiro HTTP ready: ${url}\nKeep this window open. stop.cmd stops only this private daemon.\nUse auth.cmd login then models.cmd if the account model list is empty.`,
           );
           browserTask = Promise.resolve(browserTask)
             .then(() => (flags["no-browser"] ? undefined : openBrowser(url)))
@@ -427,11 +422,10 @@ async function doctor(state, flags) {
     );
   const critical = new Set([
     "runtime/node/node.exe",
-    "runtime/omp/omp.exe",
     "runtime/proxy/kiro-proxy.exe",
     "app/lib/run.mjs",
     "app/lib/proxy.mjs",
-    "app/plugin/omp-kiro/index.js",
+    "app/plugin/omp-kiro/server/provider.mjs",
   ]);
   let checked = 0;
   for (const entry of manifest.files) {
@@ -508,7 +502,7 @@ async function network(state, rest) {
 }
 export async function main(argv = process.argv.slice(2)) {
   const { action, flags, rest } = argumentsFor(argv);
-  if (action === "help" || (!["auth", "omp", "paseo"].includes(action) && rest.includes("--help"))) {
+  if (action === "help" || (!["auth", "paseo"].includes(action) && rest.includes("--help"))) {
     console.log(usage);
     return 0;
   }
@@ -516,7 +510,6 @@ export async function main(argv = process.argv.slice(2)) {
     ![
       "start",
       "setup",
-      "omp",
       "auth",
       "models",
       "usage",
@@ -540,7 +533,6 @@ export async function main(argv = process.argv.slice(2)) {
       state.config.port = port;
       await save(state.configFile, state.config);
     }
-    await ensureOmpSettings(state);
     console.log("Private setup complete. Run auth.cmd login, then start.cmd.");
     return 0;
   }
@@ -551,7 +543,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (action === "auth") {
     if (rest.some((value) => value === "--auth-file" || value.startsWith("--auth-file=")))
       throw new Error(
-        "Use --data-dir to choose the shared authentication store; --auth-file cannot split OMP/Paseo stores.",
+        "Use --data-dir to choose the private authentication store; --auth-file cannot split runtime stores.",
       );
     let args = ["status", "logout", "import-cli"].includes(rest[0]) ? ["auth", ...rest] : rest;
     const operation = authOperation(args);
@@ -601,56 +593,6 @@ export async function main(argv = process.argv.slice(2)) {
             relaySignals: true,
           }),
     );
-  if (action === "omp") {
-    const info = rest.some((value) => ["--version", "-v", "--help", "-h"].includes(value));
-    if (
-      process.platform === "win32" &&
-      process.stdin.isTTY &&
-      !flags.console &&
-      !process.env.WT_SESSION &&
-      !process.env.WEZTERM_PANE &&
-      !info &&
-      !rest.includes("--mode")
-    ) {
-      const terminal = spawn(
-        path.join(bundleRoot, "runtime/terminal/wezterm-gui.exe"),
-        [
-          "--config-file",
-          path.join(bundleRoot, "runtime/terminal/wezterm.lua"),
-          "start",
-          "--always-new-process",
-          "--cwd",
-          process.cwd(),
-          "--",
-          node,
-          path.join(bundleRoot, "app/lib/run.mjs"),
-          "omp",
-          "--console",
-          "--data-dir",
-          state.root,
-          ...(flags["accept-plugin-code"] ? ["--accept-plugin-code"] : []),
-          "--",
-          ...rest,
-        ],
-        { detached: true, stdio: "ignore" },
-      );
-      await new Promise((resolve, reject) => {
-        terminal.once("spawn", resolve);
-        terminal.once("error", reject);
-      });
-      terminal.unref();
-      return 0;
-    }
-    await ensureOmpSettings(state);
-    if (info)
-      return child(omp, [...ompArgs(), ...rest], { ...runtimeEnv(state), NODE_OPTIONS: "" });
-    await trust(state, flags);
-    const catalog = await json(path.join(state.root, "models.json"));
-    const args = accountOmpArgs(rest, catalog?.models);
-    return transport(state, (env) =>
-      child(omp, [...ompArgs(), "--approval-mode", "yolo", ...args], { ...env, NODE_OPTIONS: "" }, { relaySignals: true }),
-    );
-  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main()

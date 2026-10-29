@@ -22,15 +22,10 @@ import { fileURLToPath } from "node:url";
 import { writeZip } from "./archive.mjs";
 import { assembleUtilities } from "./assemble-utilities.mjs";
 import { applyPaseoReconnectFix } from "./paseo-reconnect.mjs";
-import { applyPaseoOmpStartupFix } from "./paseo-omp-startup.mjs";
+import { applyPaseoDirectOnly, pruneProductionClosure, assertDirectOnlyPayload } from "./paseo-direct-only.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "utf8"));
-const ompProviderRoster = JSON.parse(
-  await readFile(path.join(repo, "payload/app/omp-provider-roster.json"), "utf8"),
-);
-if (ompProviderRoster.ompVersion !== inputs.assets.omp.version)
-  throw new Error("Review the offline provider roster when changing the pinned OMP version.");
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   const flag = process.argv[i];
@@ -553,8 +548,6 @@ try {
   const nodeExtract = path.join(work, "node");
   await extract(acquired.node, nodeExtract, 1);
   await copyTree(nodeExtract, path.join(output, "runtime/node"));
-  await mkdir(path.join(output, "runtime/omp"), { recursive: true });
-  await copyFile(acquired.omp, path.join(output, "runtime/omp/omp.exe"));
   checkpoint("git");
   const gitRoot = path.join(output, "runtime/git");
   await mkdir(gitRoot, { recursive: true });
@@ -642,35 +635,6 @@ try {
     scope:
       "Direct imports only; source API review and actual Server 2019 execution remain distinct requirements",
   };
-  checkpoint("terminal");
-  const terminalExtract = path.join(work, "terminal");
-  await extract(acquired.wezterm, terminalExtract);
-  const terminalEntries = (await tree(terminalExtract)).filter((file) =>
-    /(^|\/)wezterm-gui\.exe$/i.test(file.path),
-  );
-  if (terminalEntries.length !== 1)
-    throw new Error("Official WezTerm ZIP must contain exactly one GUI executable");
-  const terminalRoot = path.dirname(path.join(terminalExtract, terminalEntries[0].path));
-  await copyTree(
-    terminalRoot,
-    path.join(output, "runtime/terminal"),
-    (name) => !/(^|\/)(mesa|wezterm\.lua)(\/|$)/i.test(name) && !/\.pdb$/i.test(name),
-  );
-  const terminalLicenses = path.join(output, "runtime/terminal/licenses");
-  await extract(acquired.weztermSource, terminalLicenses, 1, (name) =>
-    /(^|\/)(?:licenses?\/|(?:licenses?[^/]*|copying[^/]*|copyright[^/]*|notice[^/]*|ofl[^/]*)$)/i.test(
-      name,
-    ),
-  );
-  if (
-    !(await exists(path.join(terminalLicenses, "LICENSE.md"))) ||
-    !(await exists(path.join(terminalLicenses, "licenses/ANGLE.md")))
-  )
-    throw new Error("WezTerm MIT/ANGLE notices are missing from the pinned source");
-  await writeFile(
-    path.join(output, "runtime/terminal/wezterm.lua"),
-    `local wezterm = require 'wezterm'\nreturn {\n  front_end = 'Software', max_fps = 30, animation_fps = 1,\n  scrollback_lines = 3000, check_for_updates = false, font_size = 11,\n  default_prog = {'cmd.exe', '/d', '/c', wezterm.config_dir .. '/../../omp.cmd'},\n  exit_behavior = 'CloseOnCleanExit',\n}\n`,
-  );
   checkpoint("plugin");
   const source = path.join(work, "plugin");
   await extract(acquired.plugin, source, 1);
@@ -755,39 +719,37 @@ try {
   const paseoProjection = await applyPaseoReconnectFix(
     path.join(app, "node_modules/@getpaseo/server"),
   );
-  const startupProjection = await applyPaseoOmpStartupFix(
+  checkpoint("paseo-direct-only-projection");
+  const directProjection = await applyPaseoDirectOnly(
     path.join(app, "node_modules/@getpaseo/server"),
   );
-  const sourceProjections = [paseoProjection, startupProjection];
+  const sourceProjections = [paseoProjection, directProjection];
+  checkpoint("production-dependency-closure");
+  const prunedComponents = await pruneProductionClosure(app, lock);
   checkpoint("node-pty-prebuilds");
   const ptyPrebuilds = path.join(app, "node_modules/node-pty/prebuilds");
   for (const entry of await readdir(ptyPrebuilds)) {
     if (entry !== "win32-x64")
       await rm(path.join(ptyPrebuilds, entry), { recursive: true, force: true });
   }
-  // Exact npm tarballs already contain N-API node-pty prebuilds, esbuild.exe and sherpa DLLs.
+  // Exact npm tarballs contain retained N-API node-pty prebuilds and esbuild.exe.
   // No install hooks, node-gyp, downloads or compiler toolchain are needed at runtime.
   checkpoint("required-payload");
   for (const relative of [
     "start.cmd",
-    "omp.cmd",
     "auth.cmd",
     "stop.cmd",
     "doctor.cmd",
     "app/lib/run.mjs",
     "runtime/node/node.exe",
-    "runtime/omp/omp.exe",
     "runtime/git/bin/bash.exe",
     "runtime/git/cmd/git.exe",
     "runtime/proxy/kiro-proxy.exe",
-    "runtime/terminal/wezterm-gui.exe",
     "app/node_modules/node-pty/prebuilds/win32-x64/conpty.node",
     "app/node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node",
     "app/node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll",
     "app/node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe",
     "app/node_modules/@esbuild/win32-x64/esbuild.exe",
-    "app/node_modules/sherpa-onnx-win-x64/sherpa-onnx.node",
-    "app/node_modules/sherpa-onnx-win-x64/onnxruntime.dll",
     "app/node_modules/@types/node/index.d.ts",
     "app/node_modules/@getpaseo/plugin/dist/server/index.d.ts",
     "app/node_modules/@getpaseo/server/dist/server/web-ui/index.html",
@@ -837,26 +799,18 @@ try {
   const licenses = path.join(output, "LICENSES");
   await mkdir(path.join(licenses, "sources"), { recursive: true });
   for (const [name, destination] of Object.entries({
-    ompLicense: "OMP-LICENSE.txt",
-    ompNotices: "OMP-THIRD-PARTY-NOTICES.txt",
     paseoLicense: "PASEO-LICENSE.txt",
-    sherpaLicense: "SHERPA-ONNX-LICENSE.txt",
     gitSource: "sources/mingw-w64-git-2.56.0.3-1.src.tar.gz",
-  }))
-    await copyFile(acquired[name], path.join(licenses, destination));
-  for (const [name, destination] of Object.entries({
-    onnxLicense: "ONNXRUNTIME-LICENSE.txt",
-    onnxNotices: "ONNXRUNTIME-THIRD-PARTY-NOTICES.txt",
   }))
     await copyFile(acquired[name], path.join(licenses, destination));
   await copyFile(
     path.join(output, "runtime/node/LICENSE"),
     path.join(licenses, "NODE-LICENSE.txt"),
   );
-  await copyFile(path.join(plugin, "LICENSE"), path.join(licenses, "OMP-KIRO-LICENSE.txt"));
+  await copyFile(path.join(plugin, "LICENSE"), path.join(licenses, "KIRO-HTTP-PLUGIN-LICENSE.txt"));
   await writeFile(
     path.join(licenses, "SOURCE-AVAILABILITY.txt"),
-    "Git for Windows is redistributed as its complete, unmodified PortableGit distribution; its licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component source packages and build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with each installed package; NPM-PACKAGES.json records exact public integrity pins. WezTerm component licenses remain under runtime/terminal. The native WinHTTP/SSPI helper is compiled from the accompanying repository source with a statically linked MSVC runtime; no Python, Px, runtime compiler or redistributable installer is required.\n",
+    "Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every retained installed package; NPM-PACKAGES.json records exact public integrity pins. PASEO-PROVENANCE.json records narrowly hash-guarded native-only and browser projections; their complete transformation sources are included under LICENSES/sources. PRUNED-COMPONENTS.json records actual staged package bytes removed after the production dependency closure. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license and projection metadata.\n",
   );
   await copyFile(nativeSource, path.join(licenses, "sources/kiro-proxy.cpp"));
   await copyFile(
@@ -864,8 +818,8 @@ try {
     path.join(licenses, "sources/paseo-reconnect.mjs"),
   );
   await copyFile(
-    path.join(repo, "build/paseo-omp-startup.mjs"),
-    path.join(licenses, "sources/paseo-omp-startup.mjs"),
+    path.join(repo, "build/paseo-direct-only.mjs"),
+    path.join(licenses, "sources/paseo-direct-only.mjs"),
   );
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
     source: "sources/kiro-proxy.cpp",
@@ -907,11 +861,15 @@ try {
     commit: inputs.assets.paseoLicense.commit,
     tarball: lock.packages["node_modules/@getpaseo/server"],
     publishedWebUi: true,
-    builtinPluginsPreserved: true,
+    builtinPluginsPreserved: false,
+    nativePluginOnly: true,
+    builtinPlugins: [],
     sourceProjections,
   });
+  await json(path.join(licenses, "PRUNED-COMPONENTS.json"), prunedComponents);
   checkpoint("payload-hashes");
   const files = await tree(output);
+  const directOnlyPolicy = assertDirectOnlyPayload(files);
   for (const file of files) file.sha256 = await digest(path.join(output, file.path));
   const pythonInterpreterFiles = files
     .filter((file) =>
@@ -932,6 +890,7 @@ try {
     }));
   const manifest = {
     schemaVersion: 1,
+    packageVersion: JSON.parse(await readFile(path.join(app, "package.json"), "utf8")).version,
     target: inputs.target,
     sourceDateEpoch: inputs.sourceDateEpoch,
     archive: {
@@ -977,10 +936,13 @@ try {
       noFakeNativeDlls: true,
       browser:
         "User-supplied approved current Microsoft Edge or Chrome; no browser or Electron bundled",
-      speechModels: "Not bundled. Local speech must stay disabled for offline startup.",
+      speech: "Not included: optional speech service and provider runtimes omitted at source; WebSocket speech dependency is null.",
     },
     componentInventory: {
       pythonInterpreterFiles,
+      retainedRuntime: ["Paseo core/CLI", "Kiro HTTP native plugin", "Node.js", "node-pty/ConPTY", "esbuild plugin compiler", "CPython standard library", "ripgrep", "jq", "Complete PortableGit", "WinHTTP/SSPI helper"],
+      directOnlyPolicy,
+      prunedComponents,
       scope:
         "Conventional Python/PyPy EXE/DLL names across every staged file; not proof against an embedded or renamed interpreter. Complete paths and hashes remain in files. No package-wide Python-free claim is made.",
     },

@@ -136,7 +136,6 @@ async function qualify() {
       );
     });
     for (const dependency of [
-      "sherpa-onnx-node",
       "undici",
       "proxy-agent",
       "@getpaseo/plugin/server",
@@ -181,47 +180,54 @@ async function qualify() {
       return import(pathToFileURL(compilerPath));
     });
     const pluginRoot = path.join(app, "plugin/omp-kiro");
+    let provider;
+    let usageSource;
     await stage(
-      "compile:omp-kiro",
+      "compile-and-load:kiro-http",
       async () => {
         const compiled = await compiler.compilePlugin({
           client: null,
           server: path.join(pluginRoot, "index.server.ts"),
         });
         assert.ok(compiled.serverBundle?.length, "Kiro native plugin did not compile");
+        const { evaluateBundle } = await import(pathToFileURL(
+          path.join(serverRoot, "dist/server/server/plugins/bundle-evaluator.js"),
+        ));
+        const contribute = evaluateBundle(compiled.serverBundle);
+        const dispose = contribute({
+          registerProvider(value) {
+            assert.equal(provider, undefined, "Only one native provider may register");
+            provider = value;
+          },
+          registerUsageSource(value) {
+            assert.equal(usageSource, undefined, "Only one usage source may register");
+            usageSource = value;
+          },
+        });
+        assert.equal(provider?.id, "kiro-http");
+        assert.ok(usageSource, "Kiro usage source did not register");
+        assert.equal(typeof dispose, "function");
+        dispose();
       },
       60000,
     );
 
-    const builtinRoot = path.join(serverRoot, "dist/server/builtin-plugins");
-    const builtinServers = await stage("builtin-resource-inventory", async () => {
-      const servers = [];
-      const entries = await readdir(builtinRoot, { withFileTypes: true });
-      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        if (!entry.isDirectory()) continue;
-        const directory = path.join(builtinRoot, entry.name);
-        const manifest = JSON.parse(
-          await readFile(path.join(directory, "paseo-plugin.json"), "utf8"),
-        );
-        // Resolve conventional entry names like the published server plugin loader.
-        if ((await readdir(directory)).includes("index.server.ts"))
-          servers.push({ id: manifest.id, server: path.join(directory, "index.server.ts") });
-      }
-      assert.ok(servers.length > 0, "Published built-in plugin resources missing");
-      return servers;
+    await stage("native-only-server-module-load", async () => {
+      const bootstrap = await import(pathToFileURL(
+        path.join(serverRoot, "dist/server/server/bootstrap.js"),
+      ));
+      assert.ok(Object.keys(bootstrap).length, "Paseo bootstrap module did not load");
+      const { builtinPlugins } = await import(pathToFileURL(
+        path.join(serverRoot, "dist/server/server/plugins/builtin/index.js"),
+      ));
+      assert.deepEqual(builtinPlugins, [], "Unrelated built-in plugins must not load");
+      assert.deepEqual(await readdir(path.join(serverRoot, "dist/server/builtin-plugins"))
+        .catch((error) => { if (error.code === "ENOENT") return []; throw error; }), []);
+      const manifest = JSON.parse(await readFile(path.join(serverRoot, "package.json"), "utf8"));
+      for (const name of ["@agentclientprotocol/sdk", "@anthropic-ai/claude-agent-sdk", "@anthropic-ai/sdk",
+        "@opencode-ai/sdk", "@opencode/client", "ai", "openai", "sherpa-onnx-node"])
+        assert.equal(manifest.dependencies[name], undefined, `Omitted dependency retained: ${name}`);
     });
-    for (const { id, server } of builtinServers) {
-      await stage(
-        `compile:builtin:${id}`,
-        async () => {
-          assert.ok(
-            (await compiler.compilePlugin({ client: null, server })).serverBundle?.length,
-            `Built-in ${id} did not compile`,
-          );
-        },
-        60000,
-      );
-    }
     await stage("web-ui-resource", async () => {
       assert.match(
         await readFile(path.join(serverRoot, "dist/server/web-ui/index.html"), "utf8"),
@@ -234,11 +240,13 @@ async function qualify() {
       node: process.version,
       nodeABI: process.versions.modules,
       nodePty: "published win32-x64 N-API prebuild loaded and spawned bundled Node",
-      sherpa:
-        "published win32-x64 addon and DLLs loaded; speech models not downloaded or exercised",
+      speech: "Absent; optional speech service omitted, no native voice addon loaded",
       esbuild: esbuild.version,
       pluginCompilation: true,
-      builtinPluginCompilations: builtinServers.length,
+      nativePluginRegistration: provider.id,
+      nativeUsageRegistration: true,
+      unrelatedBuiltinPlugins: 0,
+      serverModuleLoaded: true,
       server2019Verified: false,
     };
   } finally {

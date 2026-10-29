@@ -3,17 +3,24 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  accountOmpArgs,
+import { pathToFileURL } from "node:url";
+
+const suppliedBundle = process.env.KIRO_TEST_BUNDLE_ROOT;
+const {
   bundleRoot,
   configurePaseo,
   initialize,
   json,
   modelRows,
   profileId,
+  pluginRoot,
   runtimeEnv,
   save,
-} from "../payload/app/lib/state.mjs";
+} = await import(
+  suppliedBundle
+    ? pathToFileURL(path.join(suppliedBundle, "app/lib/state.mjs")).href
+    : "../payload/app/lib/state.mjs"
+);
 import {
   argumentsFor,
   authOperation,
@@ -26,8 +33,29 @@ async function temporary(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
-async function catalog(state, models) {
-  await save(path.join(state.root, "models.json"), { version: 1, models });
+const fixtureAuth = {
+  kind: "social",
+  provider: "google",
+  access_token: "runtime-fixture-access",
+  refresh_token: "runtime-fixture-refresh",
+  expires_at: "2099-01-01T00:00:00.000Z",
+  profile_arn: "arn:aws:codewhisperer:us-east-1:fixture:profile/runtime",
+};
+const bundled = { skip: suppliedBundle ? false : "Requires extracted KIRO_TEST_BUNDLE_ROOT" };
+async function catalog(state, models, auth = fixtureAuth) {
+  const { saveKiroAuth } = await import(
+    pathToFileURL(path.join(pluginRoot, "server/auth.mjs")).href
+  );
+  const { kiroCatalogAccountId } = await import(
+    pathToFileURL(path.join(pluginRoot, "server/model-catalog.mjs")).href
+  );
+  await saveKiroAuth(auth, { authFile: state.authFile });
+  await save(path.join(state.root, "models.json"), {
+    version: 1,
+    fetchedAt: new Date().toISOString(),
+    accountId: kiroCatalogAccountId(auth),
+    models,
+  });
 }
 const fixtureModels = [
   { id: "fixture-model", name: "Fixture model" },
@@ -80,10 +108,10 @@ test("root, ancestor and state-subdirectory links cannot redirect private state"
   await assert.rejects(initialize(link), /symbolic link|junction/);
   await assert.rejects(initialize(path.join(link, "child")), /symbolic link|junction/);
   const state = await initialize(path.join(parent, "owned"));
-  await rm(path.join(state.root, "omp"), { recursive: true });
+  await rm(path.join(state.root, "paseo"), { recursive: true });
   await symlink(
     target,
-    path.join(state.root, "omp"),
+    path.join(state.root, "paseo"),
     process.platform === "win32" ? "junction" : "dir",
   );
   await assert.rejects(initialize(state.root), /symbolic link|junction/);
@@ -99,6 +127,8 @@ test("mixed-case inherited environment cannot escape the private runtime or inje
   };
   const env = runtimeEnv(state, {
     Path: "inherited-tools",
+    HOME: "caller-git-home",
+    USERPROFILE: "caller-windows-home",
     pAsEo_HoMe: "foreign",
     paseo_host: "remote",
     Pi_Config_Dir: "foreign",
@@ -120,36 +150,68 @@ test("mixed-case inherited environment cannot escape the private runtime or inje
   assert.equal(env.omp_kiro_model_catalog_file, undefined);
   assert.equal(env.NODE_OPTIONS, "--max-old-space-size=192");
   assert.equal(env.NODE_EXTRA_CA_CERTS, "enterprise.pem");
+  assert.equal(env.HOME, "caller-git-home");
+  assert.equal(env.USERPROFILE, "caller-windows-home");
+  assert.equal(env.PI_CONFIG_DIR, undefined);
+  assert.equal(env.PI_CODING_AGENT_DIR, undefined);
+  assert.equal(env.OMP_KIRO_TRANSPORT, undefined);
   assert.equal(env.paseo_host, undefined);
   assert.equal(env.BuN_Options, undefined);
 });
 
-test("account model selection never invents auto or accepts aliases and fallback providers", () => {
-  assert.throws(() => modelRows([]), /No account model metadata/);
-  assert.throws(() => modelRows([{ id: "same" }, { id: "same" }]), /duplicate/);
-  assert.throws(() => accountOmpArgs([], [{ id: "fixture-model" }]), /no auto model/);
-  assert.deepEqual(accountOmpArgs(["--model", "kiro-http/fixture-model"], fixtureModels), [
-    "--model",
-    "kiro-http/fixture-model",
-  ]);
-  assert.equal(accountOmpArgs([], fixtureModels)[1], "kiro-http/auto");
-  for (const args of [
-    ["--model"],
-    ["--model="],
-    ["--model", "auto"],
-    ["--model", "kiro-http/not-in-account"],
-    ["--model", "other/fixture-model"],
-    ["--provider=other"],
-    ["--models=*"],
-    ["--smol=other/fixture-model"],
-    ["--model=kiro-http/auto", "--model", "other/fixture-model"],
-  ])
-    assert.throws(() => accountOmpArgs(args, fixtureModels));
-  const positionals = ["--", "--model", "not-a-selector"];
-  assert.deepEqual(accountOmpArgs(positionals, fixtureModels).slice(2), positionals);
+test("active virtual environments precede bundled Python while utilities remain on PATH", () => {
+  const active = path.join(tmpdir(), "active-python");
+  const state = {
+    root: path.join(tmpdir(), "private"),
+    home: path.join(tmpdir(), "private", "paseo"),
+    authFile: path.join(tmpdir(), "private", "auth.sqlite3"),
+    config: { nodeHeapMb: 192 },
+  };
+  const env = runtimeEnv(state, {
+    PATH: "caller-tools",
+    VIRTUAL_ENV: active,
+    CONDA_PREFIX: path.join(tmpdir(), "unused-conda"),
+  });
+  const entries = env.PATH.split(path.delimiter);
+  assert.ok(entries.includes(path.join(bundleRoot, "runtime/tools")));
+  assert.ok(entries.includes(path.join(bundleRoot, "runtime/git/usr/bin")));
+  assert.ok(
+    entries.indexOf(path.join(active, process.platform === "win32" ? "Scripts" : "bin")) <
+      entries.indexOf(path.join(bundleRoot, "runtime/python")),
+  );
 });
 
-test("Paseo disables an empty catalog, restores initial activation and preserves explicit user choices", async (t) => {
+test("account catalog models retain exact native IDs and never invent an auto model", () => {
+  assert.throws(() => modelRows([]), /No account model metadata/);
+  assert.throws(() => modelRows([{ id: "same" }, { id: "same" }]), /duplicate/);
+  assert.deepEqual(modelRows(fixtureModels), [
+    { id: "fixture-model", label: "Fixture model" },
+    { id: "auto", label: "Account auto", isDefault: true },
+  ]);
+  assert.deepEqual(modelRows([{ id: "fixture-model" }]), [
+    { id: "fixture-model", label: "fixture-model" },
+  ]);
+  assert.deepEqual(modelRows([{ id: "-native,raw id" }]), [
+    { id: "-native,raw id", label: "-native,raw id" },
+  ]);
+});
+
+test("missing credentials never enable a catalog or load unused providers", async (t) => {
+  const state = await initialize(path.join(await temporary(t), "state"));
+  await save(path.join(state.root, "models.json"), { version: 1, models: fixtureModels });
+  let config = await configurePaseo(state);
+  const profile = config.daemon.agentProfiles.find((entry) => entry.id === profileId);
+  assert.deepEqual(Object.keys(config.agents.providers), ["kiro-http"]);
+  assert.equal(config.agents.providers[profileId].enabled, false);
+  assert.equal(profile.cliDefault, false);
+  assert.equal(profile.model, undefined);
+  assert.equal(profile.modeId, "full");
+  await writeFile(path.join(state.root, "models.json"), "{malformed");
+  config = await configurePaseo(state);
+  assert.equal(config.agents.providers[profileId].enabled, false);
+});
+
+test("Paseo restores authenticated activation and preserves explicit user choices", bundled, async (t) => {
   const state = await initialize(path.join(await temporary(t), "state"));
   let config = await configurePaseo(state);
   assert.equal(config.agents.providers[profileId].enabled, false);
@@ -164,23 +226,22 @@ test("Paseo disables an empty catalog, restores initial activation and preserves
   await catalog(state, fixtureModels);
   config = await configurePaseo(state);
   assert.equal(config.agents.providers[profileId].enabled, true);
-  for (const provider of [profileId, "kiro-http"])
-    assert.equal(
-      config.agents.providers[provider].env.OMP_KIRO_MODEL_CATALOG_FILE,
-      path.join(state.root, "models.json"),
-    );
+  assert.equal(
+    config.agents.providers[profileId].env.OMP_KIRO_MODEL_CATALOG_FILE,
+    path.join(state.root, "models.json"),
+  );
   assert.equal(
     config.daemon.agentProfiles.find((profile) => profile.id === profileId).model,
-    "kiro-http/auto",
+    "auto",
   );
   assert.equal(
     config.daemon.agentProfiles.find((profile) => profile.id === profileId).cliDefault,
     true,
   );
   config.agents.providers[profileId].enabled = false;
-  for (const provider of [profileId, "kiro-http"])
-    config.agents.providers[provider].env.omp_kiro_model_catalog_file = "foreign";
-  config.agents.providers.codex = { enabled: true, env: { CUSTOM: "retained" } };
+  config.agents.providers[profileId].env.omp_kiro_model_catalog_file = "foreign";
+  config.agents.providers.codex = { enabled: true, env: { CUSTOM: "removed" } };
+  config.daemon.agentProfiles[0].modeId = "plan";
   config.pluginsEnabled = false;
   await save(path.join(state.home, "config.json"), config);
   await configurePaseo(state);
@@ -189,18 +250,17 @@ test("Paseo disables an empty catalog, restores initial activation and preserves
   await catalog(state, fixtureModels);
   config = await configurePaseo(state);
   assert.equal(config.agents.providers[profileId].enabled, false);
-  for (const provider of [profileId, "kiro-http"]) {
-    assert.equal(
-      config.agents.providers[provider].env.OMP_KIRO_MODEL_CATALOG_FILE,
-      path.join(state.root, "models.json"),
-    );
-    assert.equal(config.agents.providers[provider].env.omp_kiro_model_catalog_file, undefined);
-  }
-  assert.deepEqual(config.agents.providers.codex, { enabled: true, env: { CUSTOM: "retained" } });
+  assert.equal(
+    config.agents.providers[profileId].env.OMP_KIRO_MODEL_CATALOG_FILE,
+    path.join(state.root, "models.json"),
+  );
+  assert.equal(config.agents.providers[profileId].env.omp_kiro_model_catalog_file, undefined);
+  assert.equal(config.agents.providers.codex, undefined);
+  assert.equal(config.daemon.agentProfiles[0].modeId, "plan");
   assert.equal(config.pluginsEnabled, false);
 });
 
-test("an empty refreshed catalog removes stale profile model and has no default fallback", async (t) => {
+test("an empty refreshed catalog removes stale profile model and has no default fallback", bundled, async (t) => {
   const state = await initialize(path.join(await temporary(t), "state"));
   await catalog(state, fixtureModels);
   await configurePaseo(state);
@@ -213,6 +273,41 @@ test("an empty refreshed catalog removes stale profile model and has no default 
   assert.deepEqual(config.agents.providers[profileId].models, []);
 });
 
+test("changed account and malformed snapshots fail closed without rotating credentials", bundled, async (t) => {
+  const state = await initialize(path.join(await temporary(t), "state"));
+  await catalog(state, fixtureModels);
+  const initial = await configurePaseo(state);
+  assert.equal(initial.agents.providers[profileId].enabled, true);
+  const { saveKiroAuth, readKiroAuth } = await import(
+    pathToFileURL(path.join(pluginRoot, "server/auth.mjs")).href
+  );
+  const otherAccount = { ...fixtureAuth, profile_arn: `${fixtureAuth.profile_arn}-other` };
+  await saveKiroAuth(otherAccount, { authFile: state.authFile });
+  let config = await configurePaseo(state);
+  assert.equal(config.agents.providers[profileId].enabled, false);
+  assert.equal(config.daemon.agentProfiles[0].cliDefault, false);
+  assert.equal(config.daemon.agentProfiles[0].model, undefined);
+  assert.deepEqual(await readKiroAuth({ authFile: state.authFile }), otherAccount);
+  await catalog(state, fixtureModels);
+  await writeFile(path.join(state.root, "models.json"), "{malformed");
+  config = await configurePaseo(state);
+  assert.equal(config.agents.providers[profileId].enabled, false);
+  assert.deepEqual(await readKiroAuth({ authFile: state.authFile }), fixtureAuth);
+});
+
+test("direct profile uses real first model when auto is absent and preserves Ask", bundled, async (t) => {
+  const state = await initialize(path.join(await temporary(t), "state"));
+  await catalog(state, [fixtureModels[0]]);
+  let config = await configurePaseo(state);
+  assert.equal(config.daemon.agentProfiles[0].model, "fixture-model");
+  assert.equal(config.daemon.agentProfiles[0].modeId, "full");
+  assert.equal(config.daemon.agentProfiles[0].cliDefault, true);
+  config.daemon.agentProfiles[0].modeId = "ask";
+  await save(path.join(state.home, "config.json"), config);
+  config = await configurePaseo(state);
+  assert.equal(config.daemon.agentProfiles[0].modeId, "ask");
+});
+
 test("configuration concurrent edit detection does not overwrite the user change", async (t) => {
   const file = path.join(await temporary(t), "config.json");
   await writeFile(file, "user changed it");
@@ -222,7 +317,7 @@ test("configuration concurrent edit detection does not overwrite the user change
 
 test("wrapper preserves native positional separator and pins all Paseo target selectors", () => {
   const parsed = argumentsFor([
-    "omp",
+    "paseo",
     "--data-dir",
     path.resolve("private"),
     "--",
@@ -268,6 +363,15 @@ test("wrapper preserves native positional separator and pins all Paseo target se
       ...offline,
     ]);
   }
+});
+
+test("main Paseo port is reserved and default private state stays on 16767", async (t) => {
+  assert.throws(() => argumentsFor(["start", "--port", "6767"]), /main Paseo port/);
+  const state = await initialize(path.join(await temporary(t), "state"));
+  assert.equal(state.config.port, 16767);
+  state.config.port = 6767;
+  await save(state.configFile, state.config);
+  await assert.rejects(initialize(state.root), /main Paseo port/);
 });
 
 test("auth help cannot masquerade as a successful login or logout and target store overrides fail closed", () => {
