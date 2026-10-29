@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFile, writeFile, readdir, lstat, rm } from "node:fs/promises";
 import path from "node:path";
+import { projectionEditor, trustedForkSource } from "./paseo-projection-ast.mjs";
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const omittedDependencies = [
@@ -9,14 +10,14 @@ const omittedDependencies = [
   "@anthropic-ai/claude-agent-sdk", "@anthropic-ai/sdk", "@opencode-ai/sdk",
   "@opencode/client", "ai", "openai", "sherpa-onnx-node",
 ];
-const guards = {
-  "package.json": "e40a4141f614a71c470308812493b5ad342ff60cf8f01d38f57d38b547a80bd1",
-  "dist/server/server/agent/provider-registry.js": "bc5edd6570917a52f4742a74f37000e62dab33efc6f05c94ef70f04df3f700c3",
-  "dist/server/server/agent/provider-runtime.js": "73f8d37ea5fb6b95bae4b1c3e6500abf61b38766b609ffb5cb53524fcb5804a9",
-  "dist/server/server/bootstrap.js": "ed0cdd546451a3751fa4af18b8f028d2e321849defaee39f5cce0c069171e933",
-  "dist/server/server/plugins/builtin/index.js": "d72240bc3f7246f466c3b862961026f7b0220d80c9a30a8d017830484ba6f961",
-  "dist/server/server/speech/speech-runtime.js": "9aeced411c7f2c31f7e9780a3baf468c2964da895b2e4bf87b4dd6d17cf06fd0",
-};
+const projectionInputs = [
+  "package.json",
+  "dist/server/server/agent/provider-registry.js",
+  "dist/server/server/agent/provider-runtime.js",
+  "dist/server/server/bootstrap.js",
+  "dist/server/server/plugins/builtin/index.js",
+  "dist/server/server/speech/speech-runtime.js",
+];
 
 async function files(root, relative = "") {
   const result = [];
@@ -28,12 +29,79 @@ async function files(root, relative = "") {
   }
   return result.sort((a, b) => a.path.localeCompare(b.path, "en"));
 }
-function replaceOnce(source, before, after) {
-  if (source.split(before).length !== 2) throw new Error(`Direct-only boundary changed: ${before}`);
-  return source.replace(before, after);
+function declaration(ts, node, name) {
+  return (ts.isFunctionDeclaration(node) && node.name?.text === name) ||
+    (ts.isVariableStatement(node) && node.declarationList.declarations.length === 1 &&
+      node.declarationList.declarations[0].name.getText() === name);
 }
-function omitLines(source, first, last) {
-  return source.split("\n").filter((_, index) => index + 1 < first || index + 1 > last).join("\n");
+function removeImport(ts, editor, specifier) {
+  editor.change(`remove import ${specifier}`, (node) => ts.isImportDeclaration(node) &&
+    node.moduleSpecifier.text === specifier, "");
+}
+function removeNamedImport(ts, editor, name) {
+  editor.change(`remove imported ${name}`, (node) => ts.isImportDeclaration(node) &&
+    node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings) &&
+    node.importClause.namedBindings.elements.some((element) => element.name.text === name),
+  (node) => {
+    const clause = node.importClause;
+    const bindings = ts.factory.updateNamedImports(clause.namedBindings,
+      clause.namedBindings.elements.filter((element) => element.name.text !== name));
+    return ts.createPrinter().printNode(ts.EmitHint.Unspecified,
+      ts.factory.updateImportDeclaration(node, node.modifiers,
+        ts.factory.updateImportClause(clause, clause.isTypeOnly, clause.name, bindings),
+        node.moduleSpecifier, node.attributes), editor.ast);
+  });
+}
+function callStatement(ts, node, callee) {
+  return ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+    node.expression.expression.getText() === callee;
+}
+
+function projectProviderRuntime(ts, file, source) {
+  let editor = projectionEditor(ts, file, source);
+  removeImport(ts, editor, "./providers/opencode/bridge.js");
+  editor.change("OpenCode bridge allocation", (node) => declaration(ts, node, "bridge"), "");
+  editor.change("unwrap bridge startup failure boundary", (node) => ts.isTryStatement(node) &&
+    ts.isFunctionDeclaration(node.parent.parent) && node.parent.parent.name?.text === "createAgentProviderRuntime",
+  (node) => {
+    const statements = node.tryBlock.statements;
+    if (statements.length !== 4 || statements[0].getText(editor.ast) !== "await bridge.start();")
+      throw new Error("Provider runtime bridge startup boundary changed");
+    return statements.slice(1).map((statement) => statement.getText(editor.ast)).join("\n");
+  });
+  editor.change("unwrap bridge shutdown boundary", (node) => ts.isTryStatement(node) &&
+    ts.isFunctionDeclaration(node.parent.parent) && node.parent.parent.name?.text === "shutdownProviderRuntime",
+  (node) => {
+    if (node.tryBlock.statements.length !== 1 ||
+        node.tryBlock.statements[0].getText(editor.ast) !== "await snapshotManager.shutdown();")
+      throw new Error("Provider snapshot shutdown boundary changed");
+    return node.tryBlock.statements[0].getText(editor.ast);
+  });
+  source = editor.finish();
+  editor = projectionEditor(ts, file, source);
+  editor.change("snapshot manager without OpenCode bridge", (node) => ts.isObjectLiteralExpression(node) &&
+    node.properties.some((property) => ts.isPropertyAssignment(property) && property.name.getText() === "openCodeBridge"),
+  (node) => ts.createPrinter().printNode(ts.EmitHint.Expression,
+    ts.factory.updateObjectLiteralExpression(node, node.properties.filter((property) => property.name?.getText() !== "openCodeBridge")),
+    editor.ast));
+  editor.change("runtime without OpenCode tool catalog", (node) => ts.isObjectLiteralExpression(node) &&
+    node.properties.some((property) => ts.isPropertyAssignment(property) && property.name.getText() === "setPaseoToolCatalog"),
+  (node) => ts.createPrinter().printNode(ts.EmitHint.Expression,
+    ts.factory.updateObjectLiteralExpression(node, node.properties.filter((property) => property.name?.getText() !== "setPaseoToolCatalog")),
+    editor.ast));
+  source = editor.finish();
+  editor = projectionEditor(ts, file, source);
+  editor.change("snapshot-only shutdown call", (node) => ts.isCallExpression(node) &&
+    node.expression.getText() === "shutdownProviderRuntime" && node.arguments.length === 2 &&
+    node.arguments[1].getText() === "bridge", "shutdownProviderRuntime(snapshotManager)");
+  editor.change("snapshot-only shutdown signature", (node) => ts.isFunctionDeclaration(node) &&
+    node.name?.text === "shutdownProviderRuntime" && node.parameters.length === 2,
+  (node) => {
+    const updated = ts.factory.updateFunctionDeclaration(node, node.modifiers, node.asteriskToken,
+      node.name, node.typeParameters, [node.parameters[0]], node.type, node.body);
+    return ts.createPrinter().printNode(ts.EmitHint.Unspecified, updated, editor.ast);
+  });
+  return editor.finish();
 }
 function imports(ts, file, source) {
   const names = [];
@@ -49,65 +117,74 @@ function imports(ts, file, source) {
   return names;
 }
 
-// The public package is immutable input. Line ranges below are anchored by complete
-// file SHA-256, not best-effort matches against another Paseo release.
-export async function applyPaseoDirectOnly(serverRoot) {
+// Compiled boundaries are authenticated by the manifest emitted by the isolated
+// pinned-fork source build, not hashes from an unrelated public npm release.
+export async function applyPaseoDirectOnly(serverRoot, { fork } = {}) {
+  if (fork?.schemaVersion !== 1 || !fork.source || !fork.serverProjectionInputs)
+    throw new Error("Native projection requires a complete fork build manifest");
+  const forkSource = await trustedForkSource(fork.source);
   const originals = new Map();
-  for (const [file, expected] of Object.entries(guards)) {
+  for (const file of projectionInputs) {
+    const expected = fork.serverProjectionInputs[file];
     const bytes = await readFile(path.join(serverRoot, file));
-    if (sha256(bytes) !== expected) throw new Error(`Direct-only projection refused changed public input: ${file}`);
+    if (!/^[a-f0-9]{64}$/.test(expected ?? "") || sha256(bytes) !== expected)
+      throw new Error(`Native projection refused changed fork compiler input: ${file}`);
     originals.set(file, bytes.toString("utf8"));
   }
+  const ts = createRequire(path.join(serverRoot, "package.json"))("typescript");
   const outputs = new Map();
   const registryFile = "dist/server/server/agent/provider-registry.js";
-  let registry = originals.get(registryFile);
-  // Remove built-in/derived CLI factories, preserving the actual plugin adapter,
-  // model decoration, permission contracts, registry entries, and shutdown logic.
-  registry = omitLines(registry, 460, 571);
-  registry = omitLines(registry, 141, 151);
-  registry = omitLines(registry, 85, 98);
-  registry = omitLines(registry, 51, 84);
-  registry = omitLines(registry, 23, 50);
-  registry = omitLines(registry, 19, 21);
-  registry = omitLines(registry, 4, 16);
-  registry = replaceOnce(registry, "BUILTIN_PROVIDER_IDS, DEV_AGENT_PROVIDER_DEFINITIONS,", "BUILTIN_PROVIDER_IDS,");
-  registry = replaceOnce(registry,
-    '    const resolvedProviders = buildResolvedBuiltinProviders(providerOverrides, runtimeSettings, {\n        workspaceGitService: options?.workspaceGitService,\n        managedProcesses: options?.managedProcesses,\n        ompRuntime: options?.ompRuntime,\n        openCodeBridge: options?.openCodeBridge,\n    }, options?.isDev === true);',
-    '    const resolvedProviders = new Map();\n    for (const [id, override] of Object.entries(providerOverrides)) {\n        if (override.extends || (BUILTIN_PROVIDER_IDS.includes(id) && override.enabled !== false))\n            throw new Error(`This Kiro HTTP distribution does not include CLI provider ${id}`);\n    }');
-  registry = replaceOnce(registry,
-    '    addDerivedProviders(resolvedProviders, providerOverrides, {\n        managedProcesses: options?.managedProcesses,\n        openCodeBridge: options?.openCodeBridge,\n    });', "");
-  outputs.set(registryFile, registry);
-  outputs.set("dist/server/server/agent/provider-runtime.js", `import { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
-export async function createAgentProviderRuntime(options) {
-    const snapshotManager = new ProviderSnapshotManager({
-        ...options.snapshotManager,
-        logger: options.logger.child({ module: "provider-snapshot-manager" }),
-    });
-    let shutdownPromise;
-    return {
-        snapshotManager,
-        shutdown: () => shutdownPromise ??= snapshotManager.shutdown(),
-    };
-}
-`);
+  const registry = projectionEditor(ts, registryFile, originals.get(registryFile));
+  for (const name of [
+    "isNonEmptyStringArray", "PROVIDER_CONTRACTS", "UNSUPPORTED_PROVIDER_CONTRACT",
+    "HUB_E2E_PROVIDER_ID", "HUB_E2E_MCP_SERVER", "HUB_E2E_TOOL_NAME", "HUB_E2E_PROVIDER_CONTRACT",
+    "PROVIDER_CLIENT_FACTORIES", "getCursorACPCommand", "getProviderClientFactory",
+    "createDerivedDefinition", "buildResolvedBuiltinProviders", "addDerivedProviders",
+  ]) registry.change(`omit CLI factory ${name}`, (node) => node.parent === registry.ast && declaration(ts, node, name), "");
+  registry.change("omit CLI provider imports", (node) => ts.isImportDeclaration(node) &&
+    node.moduleSpecifier.text.startsWith("./providers/"), "", 13);
+  removeNamedImport(ts, registry, "DEV_AGENT_PROVIDER_DEFINITIONS");
+  registry.change("start with native plugin registrations only", (node) => ts.isVariableStatement(node) &&
+    node.declarationList.declarations.length === 1 &&
+    node.declarationList.declarations[0].name.getText() === "resolvedProviders" &&
+    ts.isCallExpression(node.declarationList.declarations[0].initializer) &&
+    node.declarationList.declarations[0].initializer.expression.getText() === "buildResolvedBuiltinProviders",
+  `const resolvedProviders = new Map();
+    for (const [id, override] of Object.entries(providerOverrides)) {
+        if (override.extends || (BUILTIN_PROVIDER_IDS.includes(id) && override.enabled !== false))
+            throw new Error(\`This Kiro HTTP distribution does not include CLI provider \${id}\`);
+    }`);
+  registry.change("omit derived CLI registration", (node) => callStatement(ts, node, "addDerivedProviders"), "");
+  outputs.set(registryFile, registry.finish());
+  const runtimeFile = "dist/server/server/agent/provider-runtime.js";
+  outputs.set(runtimeFile, projectProviderRuntime(ts, runtimeFile, originals.get(runtimeFile)));
+
   const bootstrapFile = "dist/server/server/bootstrap.js";
-  let bootstrap = originals.get(bootstrapFile);
-  bootstrap = omitLines(bootstrap, 1400, 1402);
-  bootstrap = replaceOnce(bootstrap, "        await speechService.stop();\n", "");
-  bootstrap = omitLines(bootstrap, 1242, 1247);
-  bootstrap = replaceOnce(bootstrap, "daemonAuth, speechService, terminalManager", "daemonAuth, null, terminalManager");
-  bootstrap = replaceOnce(bootstrap, "                            setAgentProviderToolsEnabled(mcpEnabled && inject);\n", "");
-  bootstrap = replaceOnce(bootstrap, "                            setAgentProviderToolsEnabled(mcpEnabled && value !== false);\n", "");
-  bootstrap = omitLines(bootstrap, 1128, 1130);
-  bootstrap = replaceOnce(bootstrap, "    setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);\n", "");
-  bootstrap = replaceOnce(bootstrap, 'import { createSpeechService } from "./speech/speech-runtime.js";\n', "");
-  bootstrap = replaceOnce(bootstrap, "createPaseoToolCatalog, createPaseoAgentToolManifest,", "createPaseoToolCatalog,");
-  outputs.set(bootstrapFile, bootstrap);
+  const bootstrap = projectionEditor(ts, bootstrapFile, originals.get(bootstrapFile));
+  removeImport(ts, bootstrap, "./speech/speech-runtime.js");
+  removeNamedImport(ts, bootstrap, "createPaseoAgentToolManifest");
+  for (const name of ["setAgentProviderToolsEnabled", "speechService"])
+    bootstrap.change(`omit optional service ${name}`, (node) => declaration(ts, node, name), "");
+  bootstrap.change("omit OpenCode catalog wiring", (node) => callStatement(ts, node, "setAgentProviderToolsEnabled"), "", 3);
+  for (const method of ["start", "stop"])
+    bootstrap.change(`omit speech ${method}`, (node) => ts.isExpressionStatement(node) &&
+      (callStatement(ts, node, `speechService.${method}`) ||
+       (ts.isAwaitExpression(node.expression) && ts.isCallExpression(node.expression.expression) &&
+        node.expression.expression.expression.getText() === `speechService.${method}`)), "");
+  bootstrap.change("omit speech creation log", (node) => callStatement(ts, node, "logger.info") &&
+    node.expression.arguments.some((argument) => ts.isStringLiteral(argument) && argument.text === "Speech service created"), "");
+  bootstrap.change("nullable upstream speech boundary", (node) => ts.isIdentifier(node) && node.text === "speechService" &&
+    ts.isNewExpression(node.parent) && node.parent.expression.getText() === "VoiceAssistantWebSocketServer", "null");
+  outputs.set(bootstrapFile, bootstrap.finish());
+
   const builtinFile = "dist/server/server/plugins/builtin/index.js";
-  outputs.set(builtinFile, replaceOnce(originals.get(builtinFile), originals.get(builtinFile).split("\n").slice(3, 17).join("\n"), "export const builtinPlugins = [];"));
+  const builtin = projectionEditor(ts, builtinFile, originals.get(builtinFile));
+  builtin.change("omit unrelated built-in plugin roster", (node) => ts.isArrayLiteralExpression(node) &&
+    ts.isVariableDeclaration(node.parent) && node.parent.name.getText() === "builtinPlugins", "[]");
+  outputs.set(builtinFile, builtin.finish());
   const manifest = JSON.parse(originals.get("package.json"));
   for (const dependency of omittedDependencies) {
-    if (!manifest.dependencies[dependency]) throw new Error(`Expected public dependency missing: ${dependency}`);
+    if (!manifest.dependencies[dependency]) throw new Error(`Expected fork dependency missing: ${dependency}`);
     delete manifest.dependencies[dependency];
   }
   outputs.set("package.json", `${JSON.stringify(manifest, null, 2)}\n`);
@@ -116,7 +193,7 @@ export async function createAgentProviderRuntime(options) {
     const bytes = Buffer.from(text.replace(/\/\/# sourceMappingURL=[^\n]*\n?/g, ""));
     await writeFile(path.join(serverRoot, file), bytes);
     await rm(path.join(serverRoot, `${file}.map`), { force: true });
-    projectedFiles.push({ path: file, originalSha256: guards[file], patchedSha256: sha256(bytes), bytes: bytes.length });
+    projectedFiles.push({ path: file, originalSha256: fork.serverProjectionInputs[file], patchedSha256: sha256(bytes), bytes: bytes.length });
   }
 
   const removed = [];
@@ -135,7 +212,6 @@ export async function createAgentProviderRuntime(options) {
   // Keep every source file outside the two omitted implementation subtrees as a
   // conservative root, then retain all transitive local imports from those roots.
   // Shared diagnostics/provider-runner and speech config/model metadata survive.
-  const ts = createRequire(path.join(serverRoot, "package.json"))("typescript");
   const all = (await files(serverRoot)).filter((file) => /\.(?:mjs|cjs|js)$/.test(file.path) && !file.path.startsWith("dist/server/web-ui/"));
   const source = new Map(await Promise.all(all.map(async ({ path: file }) => [file, await readFile(path.join(serverRoot, file), "utf8")])));
   const candidates = (file) => /\/server\/agent\/providers\/|\/server\/speech\/providers\//.test(file);
@@ -181,8 +257,9 @@ export async function createAgentProviderRuntime(options) {
     }
   }
   return {
-    projection: "paseo-0.13.0-native-kiro-http-only",
-    scope: "Public npm server only; native plugin adapter and core terminal preserved; CLI provider factories, OpenCode bridge and optional speech service removed",
+    projection: "paseo-fork-native-kiro-http-only",
+    source: forkSource,
+    scope: "Pinned user fork server and complete fork UI; native plugin adapter, usage, session-first UI, delayed browser startup, runtime resilience and core terminal retained; CLI factories/OpenCode bridge/optional speech removed",
     speech: "Absent service passed as null through upstream's existing optional speech API; no fake addon/service and no downloads",
     builtinPlugins: [], omittedDependencies, files: projectedFiles,
     removedFiles: removed, removedBytes: removed.reduce((sum, file) => sum + file.bytes, 0),

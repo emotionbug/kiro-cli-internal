@@ -445,6 +445,7 @@ async function doctor(state, flags) {
         integrity: "verified",
         filesChecked: checked,
         node: process.version,
+        paseoSource: manifest.paseoFork.source,
         proxy: "native-winhttp-sspi",
         networkMode: state.config.network.mode,
         nodeHeapMb: state.config.nodeHeapMb,

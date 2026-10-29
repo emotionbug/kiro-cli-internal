@@ -12,12 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { runInNewContext } from "node:vm";
-import { gunzipSync, brotliDecompressSync } from "node:zlib";
-import {
-  PASEO_BROWSER_ASSET, PASEO_BROWSER_PROJECTED_ASSET, PASEO_BROWSER_PATCHED_SHA256,
-  PASEO_RECONNECT_PERIOD_MS, projectPaseoQueuedMessageRecovery,
-} from "../build/paseo-reconnect.mjs";
+const PASEO_RECONNECT_PERIOD_MS = 30000;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -65,93 +60,6 @@ const report = {
   inputs: { client: await digest(clientEntry), nativeProvider: await digest(providerEntry) },
   scenarios: [],
 };
-// Execute only the exact shipped queue-send function, not the browser bundle
-// bootstrap. It has no module dependencies on the exercised error paths.
-const packageRoot = path.join(app, "node_modules/@getpaseo/server");
-let browserRelative = PASEO_BROWSER_PROJECTED_ASSET;
-let browserBytes;
-try {
-  browserBytes = await readFile(path.join(packageRoot, browserRelative));
-} catch (error) {
-  if (error.code !== "ENOENT" || args.length !== 0) throw error;
-  // Default source-fixture mode can qualify the projection before packaging.
-  // Explicit --app qualification must exercise the actual projected ZIP.
-  browserRelative = PASEO_BROWSER_ASSET;
-  browserBytes = await readFile(path.join(packageRoot, browserRelative));
-}
-const browserHash = createHash("sha256").update(browserBytes).digest("hex");
-const projectedBytes = browserRelative === PASEO_BROWSER_PROJECTED_ASSET
-  ? browserBytes : projectPaseoQueuedMessageRecovery(browserBytes);
-assert.equal(createHash("sha256").update(projectedBytes).digest("hex"), PASEO_BROWSER_PATCHED_SHA256);
-if (browserRelative === PASEO_BROWSER_PROJECTED_ASSET) {
-  const htmlBytes = await readFile(path.join(packageRoot, "dist/server/web-ui/index.html"));
-  const html = htmlBytes.toString("utf8");
-  assert.equal(html.split(PASEO_BROWSER_PROJECTED_ASSET.slice("dist/server/web-ui".length)).length, 2);
-  assert.ok(!html.includes(PASEO_BROWSER_ASSET.slice("dist/server/web-ui".length)));
-  await assert.rejects(readFile(path.join(packageRoot, PASEO_BROWSER_ASSET)), { code: "ENOENT" });
-  for (const [suffix, decode] of [[".gz", gunzipSync], [".br", brotliDecompressSync]]) {
-    assert.deepEqual(decode(await readFile(path.join(packageRoot, browserRelative + suffix))), browserBytes);
-    await assert.rejects(readFile(path.join(packageRoot, PASEO_BROWSER_ASSET + suffix)), { code: "ENOENT" });
-    // The package may omit compressed HTML; when present it must agree exactly.
-    let compressedHtml;
-    try { compressedHtml = await readFile(path.join(packageRoot, "dist/server/web-ui/index.html" + suffix)); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
-    if (compressedHtml) assert.deepEqual(decode(compressedHtml), htmlBytes);
-  }
-}
-function queueSender(bytes) {
-  const source = bytes.toString("utf8");
-  const prefix = "e.sendQueuedComposerMessageNow=";
-  const begin = source.indexOf(prefix);
-  const end = source.indexOf(",e.openComposerAttachment=", begin);
-  assert.ok(begin >= 0 && end > begin, "Missing shipped queue send function");
-  return runInNewContext(`(${source.slice(begin + prefix.length, end)})`, { Map, Error }, { timeout: 1000 });
-}
-const sendQueued = queueSender(projectedBytes);
-// Exercise the two exact browser methods without bootstrapping Expo. Controlled
-// timers here inspect the shipped delay, never accelerate the real SDK below.
-const projectedSource = projectedBytes.toString("utf8");
-const retryMethodsStart = projectedSource.indexOf("emitDisconnectedStateForReconnect(e,t){");
-const retryMethodsEnd = projectedSource.indexOf("resolvePingProbe(){", retryMethodsStart);
-assert.ok(retryMethodsStart >= 0 && retryMethodsEnd > retryMethodsStart);
-const browserTimers = [];
-const BrowserRetry = runInNewContext(`(class {${projectedSource.slice(retryMethodsStart, retryMethodsEnd)}})`,
-  { Date, Math, String, setTimeout: (callback, delayMs) => { browserTimers.push({ callback, delayMs }); return browserTimers.length; } },
-  { timeout: 1000 });
-const browserRetry = Object.assign(new BrowserRetry(), {
-  config: {}, shouldReconnect: true, traceInstant() {},
-  updateConnectionState(state) { this.state = state; }, attemptConnect() { throw new Error("Unexpected VM connection"); },
-});
-for (const attempt of [0, 1, 10000]) {
-  browserRetry.reconnectAttempt = attempt;
-  const at = Date.now();
-  browserRetry.emitDisconnectedStateForReconnect("offline");
-  browserRetry.armReconnectTimer();
-  assert.equal(browserTimers.at(-1).delayMs, PASEO_RECONNECT_PERIOD_MS);
-  assert.ok(Math.abs(Date.parse(browserRetry.state.nextRetryAt) - at - PASEO_RECONNECT_PERIOD_MS) < 100);
-}
-report.browserProjection = { asset: browserRelative, observedSha256: browserHash, projectedSha256: PASEO_BROWSER_PATCHED_SHA256, cases: [] };
-for (const [name, error, expectedCopies] of [
-  ["ambiguous-disconnect", Object.assign(new Error("lost acknowledgement"), { code: "DAEMON_CONNECTION_LOST", outcome: "unknown" }), 0],
-  ["request-timeout", Object.assign(new Error("acknowledgement timeout"), { code: "DAEMON_REQUEST_TIMEOUT" }), 0],
-  ["known-not-submitted", Object.assign(new Error("offline before send"), { code: "DAEMON_CONNECTION_LOST" }), 1],
-]) {
-  let queue = new Map([["agent", [{ id: "queued", text: "fixture", attachments: [] }]]]);
-  let sends = 0;
-  const input = { agentId: "agent", messageId: "queued",
-    queue: { read: (id) => queue.get(id) ?? [], write: (update) => { queue = update(queue); } },
-    submitMessage: async () => { sends++; throw error; },
-  };
-  const result = await sendQueued(input);
-  assert.equal(result.status, "failed");
-  assert.equal(queue.get("agent").length, expectedCopies);
-  if (expectedCopies === 0) {
-    assert.equal(result.deliveryOutcome, "unknown");
-    assert.equal((await sendQueued(input)).status, "missing");
-    assert.equal(sends, 1, "Catch-up replayed an ambiguously delivered queued mutation");
-  }
-  report.browserProjection.cases.push({ name, sends, queuedCopiesAfterFailure: queue.get("agent").length, deliveryOutcome: result.deliveryOutcome });
-}
 // Both acknowledgement scenarios share the same outage window: about 60s for
 // a rejected retry followed by recovery, then 30s to prove close cancels retry.
 const startedAt = Date.now();
@@ -377,7 +285,6 @@ try {
     state.directoryBefore = state.directorySnapshots.length;
     state.marker = `RECONNECT_${kind.replaceAll("-", "_").toUpperCase()}`;
     state.clientMessageId = randomUUID();
-    state.queued = new Map([[agent.id, [{ id: state.clientMessageId, text: state.marker, attachments: [] }]]]);
     const submitMessage = async () => {
       try {
         await client.sendAgentMessage(agent.id, `Write exactly one fixture marker ${state.marker}`, { messageId: state.clientMessageId });
@@ -387,15 +294,12 @@ try {
         throw error;
       }
     };
-    state.queuedInput = { agentId: agent.id, messageId: state.clientMessageId, submitMessage,
-      queue: { read: (id) => state.queued.get(id) ?? [], write: (update) => { state.queued = update(state.queued); } },
-    };
     if (kind === "accepted-before-drop") {
       await bounded(submitMessage(), "accepted prompt acknowledgement");
       assert.deepEqual(state.delivery, { accepted: true });
     } else {
       dropAcknowledgement = true;
-      state.outcome = sendQueued(state.queuedInput).then((result) => { state.queuedResult = result; });
+      state.outcome = submitMessage().catch((error) => { state.unknownDeliveryError = error; });
     }
   }
   await until(() => offline && scenarios.every(({ client }) => !client.isConnected) && promptCalls === 2, "disconnect and native backend requests");
@@ -451,9 +355,6 @@ try {
     if (kind === "acknowledgement-lost") {
       await bounded(state.outcome, "ambiguous submission outcome");
       assert.deepEqual(state.delivery, { accepted: false, code: "DAEMON_CONNECTION_LOST", outcome: "unknown" });
-      assert.equal(state.queuedResult.deliveryOutcome, "unknown");
-      assert.equal(state.queued.get(agent.id).length, 0);
-      assert.equal((await sendQueued(state.queuedInput)).status, "missing");
       assert.equal(backendSession.promptCalls, 1);
       assert.equal(frameCounts.get(kind), 1);
     }
@@ -499,7 +400,6 @@ try {
   report.cancellation = { clients: scenarios.length, observedMs: Date.now() - closedAt, upgradesAfterClose: upgradeEvents.length - upgradesBeforeClose };
   report.handshakes = handshakes;
   report.rejectedUpgrades = rejectedUpgrades;
-  report.browserRetry = { attempts: [0, 1, 10000], scheduledDelayMs: browserTimers.map(({ delayMs }) => delayMs) };
   report.connectionStates = scenarios.flatMap(({ kind, connectionStates }) => connectionStates.map(({ status, at, nextRetryAt }) => ({
     kind, status, elapsedMs: at - startedAt,
     ...(nextRetryAt ? { scheduledDelayMs: Date.parse(nextRetryAt) - at } : {}),

@@ -21,7 +21,36 @@ env:
   npm_config_fund: "false"
 
 jobs:
+  fork-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+      EXPO_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+      - uses: actions/cache@v4
+        with:
+          path: .work/download-cache
+          key: paseo-fork-source-linux-${{ hashFiles('build/inputs.json') }}
+          restore-keys: paseo-fork-source-linux-
+      - name: Build pinned user fork server, workspaces and complete web UI
+        run: node build/build-paseo-fork.mjs --output "$RUNNER_TEMP/paseo-fork" --cache "$GITHUB_WORKSPACE/.work/download-cache"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-paseo-fork
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/paseo-fork/
+
   build:
+    needs: fork-source
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -39,9 +68,13 @@ jobs:
           path: .work/download-cache
           key: windows-portable-${{ hashFiles('build/inputs.json', 'payload/app/package-lock.json') }}
           restore-keys: windows-portable-
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-paseo-fork
+          path: ${{ runner.temp }}/paseo-fork
       - name: Assemble pinned direct-only Windows distribution
         shell: pwsh
-        run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache"
+        run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache" --paseo-fork "$env:RUNNER_TEMP\paseo-fork"
       - uses: actions/upload-artifact@v4
         with:
           name: portable-windows-built

@@ -1,108 +1,97 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
-import { brotliCompress, gzip, constants as zlibConstants } from "node:zlib";
+import { projectionEditor, trustedForkSource } from "./paseo-projection-ast.mjs";
 
-// Public @getpaseo/server@0.13.0 browser entrypoint from its npm package.
-// This is a build-time source projection, not a live vendor-file hotpatch.
-export const PASEO_BROWSER_ASSET = "dist/server/web-ui/_expo/static/js/web/index-b635bff8218cfcb57983de05f96c16ba.js";
-export const PASEO_BROWSER_INPUT_SHA256 = "788d0c5e8fe47f2a7b3b24de78f1c6990fbacf250429d6eb221dac48ea44b645";
-export const PASEO_BROWSER_PATCHED_SHA256 = "bef319283eae815e33b8eed46ffbd9f65d032fb72f88eb48cf474c84330f355e";
-export const PASEO_BROWSER_PROJECTED_ASSET = `dist/server/web-ui/_expo/static/js/web/index-${PASEO_BROWSER_PATCHED_SHA256.slice(0, 32)}.js`;
-const original = 'catch(i){return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
-const projected = 'catch(i){if("unknown"===i?.outcome||"DAEMON_REQUEST_TIMEOUT"===i?.code)return{status:"failed",deliveryOutcome:"unknown",errorMessage:"Delivery outcome unknown. Reconnect and inspect the conversation before sending again."};return t.queue.write(i=>{const s=new Map(i);return s.set(t.agentId,[n,...i.get(t.agentId)??[]]),s}),{status:"failed",errorMessage:i instanceof Error?i.message:t.failedToSendMessage??o.i18n.t("composer.errors.failedToSend")}}},e.openComposerAttachment=';
 export const PASEO_RECONNECT_PERIOD_MS = 30000;
-// Change both the displayed retry deadline and the actual timer default. The
-// public SDK already retries without an attempt limit and cancels on close;
-// equal base/cap delays make even its first retry wait the full 30 seconds.
-const reconnectBoundaries = [
-  "(this.config.reconnect?.baseDelayMs??1500)*2**this.reconnectAttempt",
-  "t=this.config.reconnect?.baseDelayMs??1500,s=this.config.reconnect?.maxDelayMs??3e4",
-];
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const guards = {
+  "packages/client/src/daemon-client.ts": "eb392e7eb517bad90250fa2d2e99b98ba143ae438a3d69c796d9dddd77525299",
+  "packages/app/src/composer/actions.ts": "3f8628697bf24c9f77bcefde5e8359393a82a26af1276655a3a23e5030264491",
+  "packages/app/src/runtime/host-runtime.ts": "8d017c6f5b6ea956c6116d307359df078650914f1addc3ecb38085c4dbb82eb5",
+};
 
-export function projectPaseoQueuedMessageRecovery(bytes) {
-  const actual = createHash("sha256").update(bytes).digest("hex");
-  if (actual !== PASEO_BROWSER_INPUT_SHA256) {
-    throw new Error(`Paseo queued-message projection refused changed public input: ${actual}`);
+// Run only on the isolated, archive-authenticated source tree before compiling
+// both the client workspace and the complete fork web UI. No public UI fallback.
+export async function applyForkReconnect(sourceRoot) {
+  const source = await trustedForkSource();
+  const ts = createRequire(path.join(sourceRoot, "package.json"))("typescript");
+  const originals = new Map();
+  for (const [file, expected] of Object.entries(guards)) {
+    const bytes = await readFile(path.join(sourceRoot, file));
+    if (sha256(bytes) !== expected) throw new Error(`Fork reconnect projection refused changed source: ${file}`);
+    originals.set(file, bytes.toString("utf8"));
   }
-  let source = bytes.toString("utf8");
-  for (const [before, after] of [
-    [original, projected],
-    ...reconnectBoundaries.map((before) => [before, before.replace("1500", "3e4")]),
-    // An advertised private daemon is authoritative even when it needs a password.
-    // Never fall through to an unrelated user's default localhost:6767 daemon.
-    ["if(t){if(await this.bootstrapInitialConnectionHint(t))return}await this.bootstrapDefaultLocalhost()",
-      "if(t){await this.bootstrapInitialConnectionHint(t);return}await this.bootstrapDefaultLocalhost()"],
-  ]) {
-    const index = source.indexOf(before);
-    if (index < 0 || source.indexOf(before, index + before.length) >= 0) {
-      throw new Error("Paseo reconnect projection requires exactly one matching source boundary");
-    }
-    source = source.slice(0, index) + after + source.slice(index + before.length);
+  const outputs = new Map();
+  const clientFile = "packages/client/src/daemon-client.ts";
+  const client = projectionEditor(ts, clientFile, originals.get(clientFile), ts.ScriptKind.TS);
+  client.change("first retry default", (node) => ts.isVariableDeclaration(node) &&
+    node.name.getText(client.ast) === "DEFAULT_RECONNECT_BASE_DELAY_MS" && node.initializer?.getText(client.ast) === "1500",
+  (node) => `${node.name.getText(client.ast)} = ${PASEO_RECONNECT_PERIOD_MS}`);
+  // Keep advertised retry deadlines and actual scheduling identical, including
+  // the first attempt. Callers cannot reintroduce a shorter retry via options.
+  for (const [property, constant] of [["baseDelayMs", "DEFAULT_RECONNECT_BASE_DELAY_MS"], ["maxDelayMs", "DEFAULT_RECONNECT_MAX_DELAY_MS"]]) {
+    client.change(`fixed ${property} deadline and timer`, (node) => ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
+      node.left.getText(client.ast) === `this.config.reconnect?.${property}` &&
+      node.right.getText(client.ast) === constant, constant, 2);
   }
-  return Buffer.from(source);
-}
+  outputs.set(clientFile, client.finish());
 
-// serverRoot is the @getpaseo/server package directory in a fresh staging tree.
-// The projected entrypoint gets its own URL so cached original JS cannot undo the fix.
-export async function applyPaseoReconnectFix(serverRoot) {
-  const asset = path.join(serverRoot, PASEO_BROWSER_ASSET);
-  const target = path.join(serverRoot, PASEO_BROWSER_PROJECTED_ASSET);
-  const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-  const patchedBytes = projectPaseoQueuedMessageRecovery(await readFile(asset));
-  if (sha256(patchedBytes) !== PASEO_BROWSER_PATCHED_SHA256)
-    throw new Error("Paseo queued-message projection produced unexpected bytes");
-  const htmlPath = path.join(serverRoot, "dist/server/web-ui/index.html");
-  const html = await readFile(htmlPath);
-  const oldUrl = PASEO_BROWSER_ASSET.slice("dist/server/web-ui".length);
-  const newUrl = PASEO_BROWSER_PROJECTED_ASSET.slice("dist/server/web-ui".length);
-  const htmlText = html.toString("utf8");
-  if (htmlText.split(oldUrl).length !== 2)
-    throw new Error("Paseo browser HTML must reference exactly one original entrypoint");
-  const patchedHtml = Buffer.from(htmlText.replace(oldUrl, newUrl));
-  const encodings = [
-    { suffix: ".gz", encoding: "gzip", compress: (bytes) => promisify(gzip)(bytes, { level: 6 }) },
-    { suffix: ".br", encoding: "br", compress: (bytes) => promisify(brotliCompress)(bytes, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 } }) },
-  ];
-  const outputs = [];
-  for (const { suffix, encoding, compress } of encodings) {
-    const originalBytes = await readFile(`${asset}${suffix}`);
-    outputs.push({ path: `${target}${suffix}`, prior: `${asset}${suffix}`, encoding,
-      bytes: await compress(patchedBytes), originalSha256: sha256(originalBytes) });
-    let originalHtml;
-    try { originalHtml = await readFile(`${htmlPath}${suffix}`); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
-    if (originalHtml)
-      outputs.push({ path: `${htmlPath}${suffix}`, encoding, bytes: await compress(patchedHtml),
-        originalSha256: sha256(originalHtml) });
+  const actionsFile = "packages/app/src/composer/actions.ts";
+  const actions = projectionEditor(ts, actionsFile, originals.get(actionsFile), ts.ScriptKind.TS);
+  actions.change("queued delivery catch", (node) => ts.isCatchClause(node) &&
+    ts.isBlock(node.parent.parent) && ts.isFunctionDeclaration(node.parent.parent.parent) &&
+    node.parent.parent.parent.name?.text === "sendQueuedComposerMessageNow",
+  (node) => {
+    if (node.variableDeclaration?.name.getText(actions.ast) !== "error" ||
+        !node.block.statements.length || !ts.isExpressionStatement(node.block.statements[0]) ||
+        !ts.isCallExpression(node.block.statements[0].expression) ||
+        node.block.statements[0].expression.expression.getText(actions.ast) !== "input.queue.write")
+      throw new Error("Queued recovery must intercept before the original requeue");
+    const original = node.getText(actions.ast);
+    const opening = original.indexOf("{");
+    return original.slice(0, opening + 1) + `
+    if (typeof error === "object" && error !== null &&
+        (("outcome" in error && error.outcome === "unknown") ||
+         ("code" in error && error.code === "DAEMON_REQUEST_TIMEOUT"))) {
+      return {
+        status: "failed",
+        errorMessage: "Delivery outcome unknown. Reconnect and inspect the conversation before sending again.",
+      };
+    }` + original.slice(opening + 1);
+  });
+  outputs.set(actionsFile, actions.finish());
+
+  const hostFile = "packages/app/src/runtime/host-runtime.ts";
+  const host = projectionEditor(ts, hostFile, originals.get(hostFile), ts.ScriptKind.TS);
+  host.change("authoritative initial daemon hint", (node) => ts.isIfStatement(node) &&
+    node.expression.getText(host.ast) === "initialHint" &&
+    ts.isBlock(node.parent) && ts.isMethodDeclaration(node.parent.parent) &&
+    node.parent.parent.name.getText(host.ast) === "runBoot",
+  (node) => {
+    if (!ts.isBlock(node.thenStatement) || node.elseStatement || node.thenStatement.statements.length !== 2 ||
+        !ts.isVariableStatement(node.thenStatement.statements[0]) ||
+        node.thenStatement.statements[0].declarationList.declarations[0].initializer?.getText(host.ast) !==
+          "await this.bootstrapInitialConnectionHint(initialHint)")
+      throw new Error("Initial daemon hint bootstrap boundary changed");
+    return "if (initialHint) {\n      await this.bootstrapInitialConnectionHint(initialHint);\n      return;\n    }";
+  });
+  outputs.set(hostFile, host.finish());
+  const files = [];
+  for (const [file, text] of outputs) {
+    const bytes = Buffer.from(text);
+    await writeFile(path.join(sourceRoot, file), bytes);
+    files.push({ path: file, originalSha256: guards[file], patchedSha256: sha256(bytes), bytes: bytes.length });
   }
-  await writeFile(target, patchedBytes, { flag: "wx" });
-  for (const { path: file, bytes, prior } of outputs)
-    await writeFile(file, bytes, prior ? { flag: "wx" } : undefined);
-  await writeFile(htmlPath, patchedHtml);
-  await rm(asset);
-  for (const { prior } of outputs) if (prior) await rm(prior);
   return {
-    projection: "paseo-0.13.0-fixed-30s-reconnect-unknown-delivery-no-replay-explicit-hint",
+    projection: "paseo-fork-source-fixed-30s-reconnect-unknown-delivery-no-replay-explicit-hint",
+    source,
     reconnect: { baseDelayMs: PASEO_RECONNECT_PERIOD_MS, maxDelayMs: PASEO_RECONNECT_PERIOD_MS,
-      attempts: "unlimited until closed; existing authentication/security stops retained" },
-    initialConnectionHint: "Authoritative advertised daemon; no fallback probe of unrelated localhost:6767 on password or connection failure",
-    originalAsset: PASEO_BROWSER_ASSET,
-    asset: PASEO_BROWSER_PROJECTED_ASSET,
-    originalSha256: PASEO_BROWSER_INPUT_SHA256,
-    patchedSha256: sha256(patchedBytes),
-    bytes: patchedBytes.length,
-    html: { path: "dist/server/web-ui/index.html", originalSha256: sha256(html),
-      patchedSha256: sha256(patchedHtml), cacheBustedEntrypoint: true },
-    recompression: {
-      runtime: process.version, zlib: process.versions.zlib, brotli: process.versions.brotli,
-      settings: "gzip level 6; Brotli quality 5; generated from projected UTF-8 bytes",
-      sidecars: outputs.map(({ path: file, encoding, bytes, originalSha256 }) => ({
-        path: path.relative(serverRoot, file).split(path.sep).join("/"), encoding,
-        originalSha256, patchedSha256: sha256(bytes), bytes: bytes.length,
-      })),
-    },
-    retained: "All unrelated bytes/license notices; obsolete entrypoint removed; no source-map or SRI claims added",
+      attempts: "Unlimited until closed; authentication/security stops retained" },
+    queuedDelivery: "Unknown acknowledgement or DAEMON_REQUEST_TIMEOUT never returns to the automatic queue",
+    initialConnectionHint: "Supplied daemon is authoritative on failure/password; no unrelated localhost:6767 probe",
+    files,
   };
 }

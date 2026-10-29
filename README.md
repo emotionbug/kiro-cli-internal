@@ -2,6 +2,8 @@
 
 Windows x64용 **오프라인 설치 패키지**입니다. 경로는 `Paseo 웹 UI → Kiro HTTP 플러그인 → Kiro 서비스`입니다. **OMP·WezTerm·Kiro CLI·Claude CLI는 필요하지 않으며 배포하지 않습니다.** `omp-kiro`는 재사용하는 플러그인 프로젝트 이름이지 OMP 실행 파일 의존성을 뜻하지 않습니다.
 
+Paseo는 공개 npm 패키지만 사용하는 대신 **[사용자 포크 `emotionbug/paseo@c3bac24`](https://github.com/emotionbug/paseo/commit/c3bac24ccc2df8dcc67d807c805db0efa0817dff)의 서버·CLI·관련 workspace·웹 UI를 함께 빌드**합니다. 세션 중심 탐색, diff 초기 표시/스크롤 최적화, 브라우저 자동화 지연 시작 변경을 포함합니다. 포크의 내부 버전 표시는 0.13.0이며, 실제 소스 커밋은 `doctor.cmd`와 `bundle-manifest.json.paseoFork`에서 확인합니다. 로컬 사용자 저장소의 변경이나 실행 중인 Paseo를 수정·재시작하지 않습니다.
+
 > 설치·기동에는 외부 다운로드가 필요하지 않습니다. 로그인·목록·사용량·검색·응답 생성에는 Kiro/인증 서비스로 연결되는 승인된 HTTPS 프록시·게이트웨이가 필요합니다. 그 경로까지 차단된 완전 망 분리에서는 클라우드 기능을 사용할 수 없습니다. 검색 대상 웹사이트에는 PC가 직접 접속하지 않고 Kiro 서버에 검색을 맡깁니다.
 
 ## 다운로드와 실행
@@ -94,11 +96,18 @@ Python은 격리된 표준 라이브러리 유틸 용도이며 pip·ensurepip·T
 
 ### 재현·검증
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 0.13.0, HTTP 플러그인 0.4.4를 고정합니다. npm 설치·컴파일·다운로드는 인터넷 사용이 허용된 Windows 빌드 PC에서 끝냅니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.4를 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
+
+```sh
+# 인터넷 사용이 허용된 Ubuntu 빌드 PC
+node build/build-paseo-fork.mjs --output /tmp/paseo-fork --cache /tmp/paseo-cache
+```
+
+그 결과 폴더 전체를 승인된 Windows 빌드 PC의 `C:\Build\paseo-fork`로 옮긴 뒤 실행합니다.
 
 ```powershell
 # Windows x64 MSVC Developer Command 환경
-node build/build-bundle.mjs --output C:\Build\kiro-paseo-http-0.5.0-windows-x64
+node build/build-bundle.mjs --output C:\Build\kiro-paseo-http-0.5.0-windows-x64 --paseo-fork C:\Build\paseo-fork
 node test/windows-smoke.mjs C:\Build\kiro-paseo-http-0.5.0-windows-x64 C:\Build\qualification
 ```
 

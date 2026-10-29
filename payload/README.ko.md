@@ -2,6 +2,8 @@
 
 기본 경로는 **Paseo 웹 UI → Kiro HTTP 플러그인 → Kiro 서비스**입니다. OMP, WezTerm, Kiro CLI, Claude CLI를 설치하거나 실행하지 않습니다. Python·rg·jq·Git Bash는 작업 도구로 동봉합니다.
 
+Paseo 서버·CLI·웹 UI는 사용자 포크 `emotionbug/paseo`의 고정 커밋 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`에서 함께 빌드합니다. 세션 중심 탐색, diff 초기 표시/스크롤 최적화와 브라우저 자동화 지연 시작 변경을 포함합니다. 내부 버전 표시는 0.13.0이며 `doctor.cmd`의 `paseoSource`와 `bundle-manifest.json.paseoFork`로 실제 소스를 확인하세요. 기존 실행 중인 사용자 Paseo는 수정·재시작하지 않습니다.
+
 이 ZIP은 오프라인 설치용입니다. 로그인·모델 목록·사용량·검색·추론에는 Kiro/인증 서비스로 연결되는 승인된 HTTPS 프록시·게이트웨이가 필요합니다. 그 경로까지 차단된 완전 망 분리에서는 클라우드 기능을 사용할 수 없습니다. 검색 대상 웹사이트에 PC가 직접 접속하지 않고 Kiro 서버에 검색을 맡깁니다.
 
 ## 처음 사용

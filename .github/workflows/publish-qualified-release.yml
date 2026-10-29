@@ -70,6 +70,10 @@ jobs:
               $report.applicationProxyViolations.count -ne 0 -or $report.webUi.blockedExternalPageRequests -ne 0) {
             throw 'Qualification report or manifest does not satisfy the release contract'
           }
+          if ($manifest.paseoFork.source.commit -ne 'c3bac24ccc2df8dcc67d807c805db0efa0817dff' -or
+              $manifest.paseoFork.source.sha256 -ne 'f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff') {
+            throw 'Release must contain the pinned latest emotionbug/paseo fork, including its web UI'
+          }
           $checksum = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
           if ($checksum.Count -ne 2 -or $checksum[0] -notmatch '^[0-9a-f]{64}$' -or $checksum[1] -ne $zipName) {
             throw 'Invalid qualified ZIP checksum record'

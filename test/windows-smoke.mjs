@@ -1627,6 +1627,49 @@ async function smoke() {
       60000,
     );
     assert.deepEqual(report.webUiDiagnostics.uncaughtExceptionTypes, [], "Bundled UI raised an uncaught exception");
+    report.webUiDiagnostics.stage = "real browser queue delivery";
+    const queueModule = manifest.paseoFork.webUi.composerQueue;
+    const queueEvaluation = await browserCdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const send = globalThis.__r(${JSON.stringify(queueModule.moduleId)})[${JSON.stringify(queueModule.exportName)}];
+        if (typeof send !== "function") throw new Error("Missing production queue export");
+        const cases = [];
+        for (const [name, properties] of [
+          ["ambiguous-disconnect", {code:"DAEMON_CONNECTION_LOST",outcome:"unknown"}],
+          ["request-timeout", {code:"DAEMON_REQUEST_TIMEOUT"}],
+          ["known-not-submitted", {code:"DAEMON_CONNECTION_LOST"}],
+        ]) {
+          let queue = new Map([["fixture-agent", [{id:"queued",text:"fixture",attachments:[]}]]]);
+          let sends = 0;
+          const input = {
+            agentId:"fixture-agent",messageId:"queued",
+            queue:{read:id=>queue.get(id)??[],write:update=>{queue=update(queue)}},
+            submitMessage:async()=>{sends++;throw Object.assign(new Error("controlled delivery failure"),properties)},
+          };
+          const result = await send(input);
+          const queuedCopies = queue.get("fixture-agent").length;
+          const next = queuedCopies === 0 ? await send(input) : null;
+          cases.push({name,status:result.status,
+            queuedCopies,nextStatus:next?.status??null,sends});
+        }
+        return cases;
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    report.browserQueue = {
+      scope: "Actual rendered production Metro module export; controlled submission failures, not copied source or a replacement implementation",
+      assetSha256: queueModule.assetSha256,
+      moduleId: queueModule.moduleId,
+      cases: queueEvaluation.result?.value,
+      exceptionType: queueEvaluation.exceptionDetails?.exception?.className ?? null,
+    };
+    assert.equal(Boolean(queueEvaluation.exceptionDetails), false, "Compiled browser queue module could not be exercised");
+    assert.deepEqual(report.browserQueue.cases, [
+      { name: "ambiguous-disconnect", status: "failed", queuedCopies: 0, nextStatus: "missing", sends: 1 },
+      { name: "request-timeout", status: "failed", queuedCopies: 0, nextStatus: "missing", sends: 1 },
+      { name: "known-not-submitted", status: "failed", queuedCopies: 1, nextStatus: null, sends: 1 },
+    ]);
     report.webUiDiagnostics.stage = "screenshot";
     await delay(1000);
     // Do not inject the password into the browser or publish arbitrary DOM text.

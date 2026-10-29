@@ -105,9 +105,18 @@
       "sha256": "966521ce9676d2ac9d8f39403a4ab4bad1b625814cc0ee827e2368ed80bf1224",
       "license": "Apache-2.0"
     },
+    "paseoFork": {
+      "repository": "https://github.com/emotionbug/paseo.git",
+      "commit": "c3bac24ccc2df8dcc67d807c805db0efa0817dff",
+      "url": "https://codeload.github.com/emotionbug/paseo/tar.gz/c3bac24ccc2df8dcc67d807c805db0efa0817dff",
+      "sha256": "f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff",
+      "lockSha256": "e3ca5a190b5bf15e27245e24e2e0c1331d313709cc6e3529072285a7fe790ead",
+      "version": "0.13.0",
+      "license": "Apache-2.0"
+    },
     "paseoLicense": {
-      "commit": "d34d17a9072149320ace35ec2a2e5c7dcd992cb3",
-      "url": "https://raw.githubusercontent.com/getpaseo/paseo/d34d17a9072149320ace35ec2a2e5c7dcd992cb3/LICENSE",
+      "commit": "c3bac24ccc2df8dcc67d807c805db0efa0817dff",
+      "url": "https://raw.githubusercontent.com/emotionbug/paseo/c3bac24ccc2df8dcc67d807c805db0efa0817dff/LICENSE",
       "sha256": "79d5aedce6aa0adc547336dc1bd34c5cc9308ba110fac7079ed97515ee573ad3"
     }
   }

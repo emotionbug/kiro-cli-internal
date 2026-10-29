@@ -21,7 +21,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeZip } from "./archive.mjs";
 import { assembleUtilities } from "./assemble-utilities.mjs";
-import { applyPaseoReconnectFix } from "./paseo-reconnect.mjs";
+import { materializePaseoFork } from "./paseo-fork.mjs";
 import { applyPaseoDirectOnly, pruneProductionClosure, assertDirectOnlyPayload } from "./paseo-direct-only.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -29,9 +29,9 @@ const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   const flag = process.argv[i];
-  if (!["--output", "--cache"].includes(flag) || !process.argv[i + 1] || options.has(flag)) {
+  if (!["--output", "--cache", "--paseo-fork"].includes(flag) || !process.argv[i + 1] || options.has(flag)) {
     throw new Error(
-      "Usage: node build/build-bundle.mjs --output <absolute absent root> [--cache <absolute directory>]",
+      "Usage: node build/build-bundle.mjs --output <absolute absent root> --paseo-fork <absolute source-build artifact directory> [--cache <absolute directory>]",
     );
   }
   if (!path.isAbsolute(process.argv[i + 1])) throw new Error(`${flag} must be absolute`);
@@ -39,6 +39,8 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 const output = options.get("--output");
 if (!output) throw new Error("--output is required");
+const forkDirectory = options.get("--paseo-fork");
+if (!forkDirectory) throw new Error("--paseo-fork is required; public npm products are not the user's fork");
 if (process.platform !== "win32" || process.arch !== "x64") {
   throw new Error(
     "A complete bundle must be built on Windows x64: published Windows native addons must load and node-pty must spawn under bundled Node 22.23.4. Linux preparation is not native validation.",
@@ -541,6 +543,7 @@ try {
   await copyTree(payload, output);
   const acquired = {};
   for (const name of Object.keys(inputs.assets)) {
+    if (name === "paseoFork") continue; // The source job acquired and compiled this immutable archive.
     checkpoint(`acquire-${name}`);
     acquired[name] = await acquire(name);
   }
@@ -715,15 +718,16 @@ try {
     ],
     { cwd: app, env, phase: "npm-cli.js", timeoutMs: 180000 },
   );
-  checkpoint("paseo-reconnect-projection");
-  const paseoProjection = await applyPaseoReconnectFix(
-    path.join(app, "node_modules/@getpaseo/server"),
-  );
+  checkpoint("paseo-fork-materialization");
+  const paseoFork = await materializePaseoFork({
+    directory: forkDirectory, app, output, repo, work, inputs, lock, extract, tree, digest,
+  });
   checkpoint("paseo-direct-only-projection");
   const directProjection = await applyPaseoDirectOnly(
     path.join(app, "node_modules/@getpaseo/server"),
+    { fork: paseoFork.manifest },
   );
-  const sourceProjections = [paseoProjection, directProjection];
+  const sourceProjections = [...paseoFork.manifest.sourceProjections, directProjection];
   checkpoint("production-dependency-closure");
   const prunedComponents = await pruneProductionClosure(app, lock);
   checkpoint("node-pty-prebuilds");
@@ -810,17 +814,9 @@ try {
   await copyFile(path.join(plugin, "LICENSE"), path.join(licenses, "KIRO-HTTP-PLUGIN-LICENSE.txt"));
   await writeFile(
     path.join(licenses, "SOURCE-AVAILABILITY.txt"),
-    "Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every retained installed package; NPM-PACKAGES.json records exact public integrity pins. PASEO-PROVENANCE.json records narrowly hash-guarded native-only and browser projections; their complete transformation sources are included under LICENSES/sources. PRUNED-COMPONENTS.json records actual staged package bytes removed after the production dependency closure. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license and projection metadata.\n",
+    `Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every retained installed package; NPM-PACKAGES.json distinguishes exact public integrity pins from compiled user-fork overlays and records their acquisition base. Paseo server, CLI, runtime workspaces and full browser UI are compiled together from ${inputs.assets.paseoFork.repository} at ${inputs.assets.paseoFork.commit}; immutable source archive ${inputs.assets.paseoFork.url}, SHA-256 ${inputs.assets.paseoFork.sha256}. Apache-2.0 LICENSE is preserved; the monorepo source archive is a CI verification input, not part of this runtime ZIP. PASEO-PROVENANCE.json records compiler, lock and hash-guarded native-only/browser source projections; their complete transformation sources and pinned inputs are included under LICENSES/sources. PRUNED-COMPONENTS.json records actual staged package bytes removed after the production dependency closure. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license and projection metadata.\n`,
   );
   await copyFile(nativeSource, path.join(licenses, "sources/kiro-proxy.cpp"));
-  await copyFile(
-    path.join(repo, "build/paseo-reconnect.mjs"),
-    path.join(licenses, "sources/paseo-reconnect.mjs"),
-  );
-  await copyFile(
-    path.join(repo, "build/paseo-direct-only.mjs"),
-    path.join(licenses, "sources/paseo-direct-only.mjs"),
-  );
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
     source: "sources/kiro-proxy.cpp",
     sourceSha256: await digest(nativeSource),
@@ -840,12 +836,13 @@ try {
     const installed = JSON.parse(await readFile(path.join(app, name, "package.json"), "utf8"));
     if (installed.version !== item.version)
       throw new Error(`Installed package differs from lock: ${name}`);
+    const fork = item.fork;
     packages.push({
       path: `app/${name}`,
       name: installed.name,
       version: item.version,
-      url: item.resolved,
-      integrity: item.integrity,
+      sourceType: fork ? "compiled-user-fork" : "public-npm",
+      ...(fork ? { fork, acquisitionBase: item.acquisitionBase } : { url: item.resolved, integrity: item.integrity }),
       license:
         installed.license ??
         item.license ??
@@ -857,10 +854,14 @@ try {
   await json(path.join(licenses, "NPM-PACKAGES.json"), packages);
   await json(path.join(licenses, "DOWNLOAD-INPUTS.json"), inputs);
   await json(path.join(licenses, "PASEO-PROVENANCE.json"), {
-    version: "0.13.0",
-    commit: inputs.assets.paseoLicense.commit,
-    tarball: lock.packages["node_modules/@getpaseo/server"],
-    publishedWebUi: true,
+    version: inputs.assets.paseoFork.version,
+    source: paseoFork.manifest.source,
+    compilation: paseoFork.manifest.compilation,
+    workspaceOverlay: paseoFork.overlay,
+    dependencyGraph: paseoFork.dependencyGraph,
+    publishedWebUi: false,
+    forkWebUi: true,
+    webUi: paseoFork.manifest.webUi,
     builtinPluginsPreserved: false,
     nativePluginOnly: true,
     builtinPlugins: [],
@@ -904,6 +905,15 @@ try {
     },
     inputs: inputs.assets,
     npmLockSha256: await digest(path.join(app, "package-lock.json")),
+    paseoFork: {
+      source: paseoFork.manifest.source,
+      version: paseoFork.manifest.version,
+      webUi: paseoFork.manifest.webUi,
+      packages: paseoFork.manifest.packages,
+      compilation: paseoFork.manifest.compilation,
+      dependencyGraph: paseoFork.dependencyGraph,
+      workspaceOverlay: paseoFork.overlay,
+    },
     sourceProjections,
     nativeValidation: {
       ...validation,
