@@ -96,7 +96,7 @@ Python은 격리된 표준 라이브러리 유틸 용도이며 pip·ensurepip·T
 
 ### 재현·검증
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.4를 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.5를 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
 
 ```sh
 # 인터넷 사용이 허용된 Ubuntu 빌드 PC

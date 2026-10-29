@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { createRequire } from "node:module";
@@ -96,6 +96,14 @@ async function smoke() {
   const accessToken = randomBytes(32).toString("base64url");
   const fileText = "KIRO_PORTABLE_NATIVE_WRITE\nUnicode: 한글 ✓\n";
   const outputFile = path.join(workspace, "chain result 한글.txt");
+  const canonicalWorkspace = await realpath(workspace);
+  const relativeOutput = path.relative(canonicalWorkspace, outputFile);
+  report.workspaceIdentity = {
+    callerUsesFilesystemAlias: workspace !== canonicalWorkspace,
+    outputParentIsCanonicalWorkspace: await realpath(path.dirname(outputFile)) === canonicalWorkspace,
+    lexicalAbsoluteTargetAppearsOutsideCanonicalRoot:
+      relativeOutput === ".." || relativeOutput.startsWith(`..${path.sep}`) || path.isAbsolute(relativeOutput),
+  };
   const toolId = "portable-smoke-write-1";
   const searchToolId = "portable-smoke-search-1";
   const promptMarker = "KIRO_PORTABLE_RECOVERY_REQUEST";

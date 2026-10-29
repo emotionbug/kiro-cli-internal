@@ -40,7 +40,60 @@ const serverEntry = require.resolve("@getpaseo/server");
 const providerEntry = path.join(app, "plugin/omp-kiro/server/provider.mjs");
 const { WebSocket, WebSocketServer } = require("ws");
 const pino = require("pino");
-const logger = pino({ level: "silent" });
+const fixturePluginId = "native-reconnect-fixture";
+const pluginFailures = [];
+function safeError(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  const code = typeof error?.code === "string" && /^(?:ERR_[A-Z_]+|E[A-Z]+|DAEMON_[A-Z_]+)$/.test(error.code)
+    ? error.code : undefined;
+  const type = ["Error", "AssertionError", "TypeError", "RangeError", "SyntaxError"].includes(error?.name ?? error?.type)
+    ? (error.name ?? error.type) : "Error";
+  const origin = typeof error?.stack === "string"
+    ? error.stack.split("\n").find((line) => /^\s+at /.test(line)) : undefined;
+  const ownedAssertion = origin?.includes(import.meta.url) ||
+    origin?.includes(fileURLToPath(import.meta.url));
+  const location = ownedAssertion ? /:(\d+):(\d+)\)?$/.exec(origin) : null;
+  let classification = "native_fixture_failure";
+  let assertion = "Native fixture operation failed; see stage, code and message digest";
+  if (code === "ERR_ASSERTION") {
+    classification = "fixture_invariant";
+    // Only assertions originating here inspect exclusively synthetic inputs and
+    // public API results. Never export assertions from dependency internals.
+    assertion = ownedAssertion
+      ? message.split("\n")[0].replaceAll(app, "[app]").replaceAll(scratch, "[fixture]")
+      : "Native dependency assertion failed";
+  } else if (/^Timed out: [a-zA-Z0-9 -]+$/.test(message)) {
+    classification = "fixture_timeout";
+    assertion = message;
+  } else if (/^Invalid plugin provider icon "icon\.svg": (?:file does not exist or is not a regular file|path leaves the plugin directory|exceeds 64 KiB)$/.test(message)) {
+    classification = "plugin_provider_icon";
+    assertion = message;
+  } else if (/^Provider '?kiro-http'? (?:is not configured|is disabled|is not available(?:\. Please ensure the CLI is installed\.)?)$/.test(message)) {
+    classification = "native_provider_unavailable";
+    assertion = message;
+  } else if (message.startsWith("Build failed with ")) {
+    classification = "plugin_compilation";
+    assertion = "The real fixture plugin failed compilation";
+  } else if (code && /^E(?:NOENT|ACCES|PERM|ADDRINUSE|CONNREFUSED|CONNRESET|PIPE)$/.test(code)) {
+    classification = "fixture_io";
+    assertion = `Fixture I/O failed (${code})`;
+  }
+  return {
+    type, ...(code ? { code } : {}), classification, assertion,
+    messageDigest: createHash("sha256").update(message).digest("hex"),
+    ...(location ? { source: `test/paseo-reconnect.mjs:${location[1]}:${location[2]}` } : {}),
+    ...(error?.cause ? { cause: safeError(error.cause) } : {}),
+  };
+}
+// PluginService deliberately catches built-in startup/registration failures.
+// Retain only classified errors for our owned plugin, never raw daemon logs.
+const logger = pino({ level: "error" }, {
+  write(line) {
+    const entry = JSON.parse(line);
+    if (entry.msg === "Failed to start built-in plugin" && entry.pluginId === fixturePluginId)
+      pluginFailures.push(safeError(entry.err));
+  },
+});
 const [{ createPaseoDaemon }, { DaemonClient }] = await Promise.all([
   import(pathToFileURL(serverEntry).href), import(pathToFileURL(clientEntry).href),
 ]);
@@ -59,6 +112,7 @@ const report = {
   versions, node: process.version, platform: process.platform,
   inputs: { client: await digest(clientEntry), nativeProvider: await digest(providerEntry) },
   scenarios: [],
+  pluginFailures,
 };
 // Both acknowledgement scenarios share the same outage window: about 60s for
 // a rejected retry followed by recovery, then 30s to prove close cancels retry.
@@ -69,10 +123,13 @@ async function bounded(promise, label, maximum = 10000) {
   const remaining = Math.min(maximum, deadline - Date.now());
   assert.ok(remaining > 0, "Reconnect qualification exceeded 105 second deadline");
   try {
-    return await Promise.race([
+    report.stage = label;
+    const value = await Promise.race([
       promise,
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), remaining); }),
     ]);
+    report.lastCompletedStage = label;
+    return value;
   } finally { clearTimeout(timer); }
 }
 async function until(predicate, label, maximum = 10000) {
@@ -167,8 +224,12 @@ async function publishFixtureFile(file, value) {
   await writeFile(`${file}.tmp`, value, { flag: "wx" });
   await rename(`${file}.tmp`, file);
 }
+// Provider icons are plugin-root-relative and cannot resolve through a symlink
+// outside that root. Package the real provider asset with the wrapper too.
+await publishFixtureFile(path.join(fixturePlugin, "icon.svg"),
+  await readFile(path.join(app, "plugin/omp-kiro/icon.svg")));
 await publishFixtureFile(path.join(fixturePlugin, "paseo-plugin.json"), JSON.stringify({
-  id: "native-reconnect-fixture", name: "Native reconnect backend qualification", requirements: { paseo: ">=0.13.0" },
+  id: fixturePluginId, name: "Native reconnect backend qualification", requirements: { paseo: ">=0.13.0" },
 }));
 await publishFixtureFile(path.join(fixturePlugin, "index.server.ts"), `
 import { createKiroHttpProvider } from "omp-kiro/server/provider.mjs";
@@ -207,10 +268,17 @@ try {
     relayEnabled: false, pluginsEnabled: false, mcpEnabled: false,
     browserToolsEnabled: false, enableTerminalAgentHooks: false,
     webUi: { enabled: false, distDir: null }, metadataGeneration: { providers: [] },
-  }, logger, { builtinPlugins: { async load(start) {
-    await start({ id: "native-reconnect-fixture", directory: fixturePlugin });
-  } } }), "daemon creation");
+  }, logger, { builtinPlugins: {
+    ids: new Set([fixturePluginId]),
+    async load(start) {
+      await start({ id: fixturePluginId, directory: fixturePlugin });
+    },
+  } }), "daemon creation");
   await bounded(daemon.start(), "daemon start");
+  assert.equal(pluginFailures.length, 0, "Native fixture plugin registration failed");
+  const providers = await bounded(daemon.agentManager.listProviderAvailability(), "native provider registration");
+  assert.ok(providers.some((provider) => provider.provider === "kiro-http" && provider.available),
+    "Native fixture provider was not registered and available");
   const target = daemon.getListenTarget();
   assert.equal(target.type, "tcp");
   assert.ok(target.port > 0 && target.port !== 6767);
@@ -265,6 +333,7 @@ try {
   await bounded(new Promise((resolve, reject) => { proxy.once("error", reject); proxy.listen(0, "127.0.0.1", resolve); }), "proxy listen");
   for (const kind of ["accepted-before-drop", "acknowledgement-lost"]) {
     const state = { kind, timelineSignals: [], connectionStates: [], directorySnapshots: [] };
+    report.activeScenario = kind;
     scenarios.push(state);
     const client = state.client = new DaemonClient({
       url: `ws://127.0.0.1:${proxy.address().port}/ws?fixture=${kind}`,
@@ -410,10 +479,10 @@ try {
   report.result = "failed";
   report.failure = {
     at: new Date().toISOString(),
-    type: error?.name ?? "Error",
-    assertion: error?.code === "ERR_ASSERTION"
-      ? String(error.message).split("\n")[0].replaceAll(app, "[app]").replaceAll(scratch, "[fixture]")
-      : "Native reconnect qualification failed; private runtime output is not exported",
+    stage: report.stage,
+    lastCompletedStage: report.lastCompletedStage,
+    activeScenario: report.activeScenario,
+    ...safeError(error),
   };
   process.exitCode = 1;
 } finally {
