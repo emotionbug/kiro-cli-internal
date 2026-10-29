@@ -7,6 +7,10 @@ on:
         description: Optional owned run with successful fork-source job; source and helper hashes must still match
         required: false
         type: string
+      bundle_run_id:
+        description: Optional successful build job; packaged recipe trees must match exactly
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -28,7 +32,7 @@ env:
 
 jobs:
   fork-source:
-    if: ${{ !inputs.fork_run_id }}
+    if: ${{ !inputs.fork_run_id && !inputs.bundle_run_id }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -58,7 +62,7 @@ jobs:
 
   build:
     needs: fork-source
-    if: ${{ !cancelled() && (needs.fork-source.result == 'success' || (needs.fork-source.result == 'skipped' && inputs.fork_run_id != '')) }}
+    if: ${{ !cancelled() && !inputs.bundle_run_id && (needs.fork-source.result == 'success' || (needs.fork-source.result == 'skipped' && inputs.fork_run_id != '')) }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -117,23 +121,47 @@ jobs:
 
   qualify:
     needs: build
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.bundle_run_id != '')) }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22.23.4"
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      - name: Authenticate reusable ZIP and identical runtime recipe
+        if: ${{ inputs.bundle_run_id != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_RUN_ID: ${{ inputs.bundle_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:BUNDLE_RUN_ID -notmatch '^\d+$') { throw 'Invalid bundle run id' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUNDLE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -ne 'completed' -or
+              $run.path -ne '.github/workflows/portable-windows.yml' -or $run.head_branch -ne 'main' -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY -or $run.head_sha -notmatch '^[0-9a-f]{40}$') {
+            throw 'Reusable ZIP must originate from an owned completed main-branch portable run'
+          }
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUNDLE_RUN_ID/jobs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($jobs.jobs | Where-Object { $_.name -eq 'build' -and $_.conclusion -eq 'success' }).Count -ne 1) {
+            throw 'Reusable ZIP build job was not successful'
+          }
+          git diff --quiet $run.head_sha $env:GITHUB_SHA -- .gitattributes build native payload package.json
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime recipe differs; a new ZIP build is required' }
       - uses: actions/download-artifact@v4
         with:
           name: portable-windows-built
           path: ${{ runner.temp }}/built
+          run-id: ${{ inputs.bundle_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Extract the actual ZIP into a fresh Unicode path
         id: extract
         shell: pwsh
@@ -161,9 +189,10 @@ jobs:
         run: |
           $node = "$env:QUALIFIED_BUNDLE_ROOT\runtime\node\node.exe"
           $report = & $node test/paseo-reconnect.mjs --app "$env:QUALIFIED_BUNDLE_ROOT\app"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $resultCode = $LASTEXITCODE
           [System.IO.Directory]::CreateDirectory("$env:RUNNER_TEMP\built\qualification") | Out-Null
           $report | Out-File -FilePath "$env:RUNNER_TEMP\built\qualification\reconnect.json" -Encoding utf8
+          if ($resultCode -ne 0) { exit $resultCode }
       - name: Exercise direct HTTP agent, actual web UI and owned cleanup
         if: ${{ !cancelled() && steps.extract.outcome == 'success' }}
         shell: pwsh

@@ -689,6 +689,12 @@ async function smoke() {
     function completedResult(state, id) {
       const results = records(state, (item) => item.toolUseId === id && "status" in item);
       assert.equal(results.length, 1, "A completed tool result must occur exactly once in history");
+      if (results[0].status !== "success") {
+        let text = (results[0].content ?? []).map((item) => item.text ?? "").join("\n");
+        for (const value of [accessToken, outputFile, workspace, data, scratch, bundle])
+          text = text.replaceAll(value, "[fixture]");
+        report.nativeToolFailure = { status: results[0].status, text: text.slice(0, 2048) };
+      }
       assert.equal(results[0].status, "success", "Actual native tool result was not successful");
       return results[0];
     }
