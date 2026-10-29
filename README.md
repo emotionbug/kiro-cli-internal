@@ -51,7 +51,7 @@ doctor.cmd --verify-all
 ### 연결 단절과 재시도
 
 - 인터넷·DNS·소켓 단절과 일시적 HTTP 오류는 사용자 취소 전까지 **30초 고정 주기**로 재시도합니다. 서버의 더 긴 `Retry-After`는 지킵니다.
-- 선택 모델과 대화 ID를 유지합니다. 실패한 시도의 임시 텍스트는 같은 메시지에서 교체하며 도구는 완전하고 유효한 응답 이후 실행합니다. 완료된 도구 결과는 유지하고 처음부터 도구를 재실행하지 않습니다.
+- 선택 모델과 대화 ID를 유지합니다. 이미 표시한 텍스트를 모델 문맥에 한 번 보존하고 이어받으므로 Paseo의 추가형 스트림에서 임시 텍스트를 지우거나 중복해서 붙이지 않습니다. 도구는 완전하고 유효한 응답 이후 실행하며 완료된 도구 결과를 유지하고 자동 재시도로 도구를 처음부터 재실행하지 않습니다.
 - Paseo 웹 연결도 첫 시도부터 30초 주기로 연결·구독·내역을 복구합니다. **수락 여부가 불명확한 프롬프트는 자동 재전송하지 않습니다.**
 - 잘못된 인증·권한·인증서·할당량·프로토콜 오류는 무한 재시도로 숨기지 않습니다. OAuth 일회용 교환/refresh는 성공 여부를 모르는 응답 유실을 무조건 재전송하지 않습니다.
 - 서비스에 도착한 생성 요청은 응답이 유실돼도 과금될 수 있습니다. 클라우드의 exactly-once/idempotency를 보장하지 않습니다.
@@ -98,7 +98,7 @@ Python은 격리된 표준 라이브러리 유틸 용도이며 pip·ensurepip·T
 
 ### 재현·검증
 
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.5를 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
+정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.6을 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
 
 ```sh
 # 인터넷 사용이 허용된 Ubuntu 빌드 PC

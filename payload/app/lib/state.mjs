@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const bundleRoot = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 export const pluginRoot = path.join(bundleRoot, "app/plugin/omp-kiro");
-export const pluginPin = "7abbf7080b29687f9672d0593680185a3f8d1fb3";
+export const pluginPin = "92d92161471c849780899264a9dc345bc7f7e82e";
 export const profileId = "kiro-http";
 
 export async function json(file, fallback = null) {

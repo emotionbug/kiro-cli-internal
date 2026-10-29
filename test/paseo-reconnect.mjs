@@ -42,6 +42,25 @@ const { WebSocket, WebSocketServer } = require("ws");
 const pino = require("pino");
 const fixturePluginId = "native-reconnect-fixture";
 const pluginFailures = [];
+let fixtureStage = "fixture setup";
+function safeMessageSnippet(message) {
+  let snippet = message;
+  for (const [directory, replacement] of [[home, "[home]"], [app, "[app]"], [scratch, "[fixture]"]]) {
+    snippet = snippet.replaceAll(directory, replacement);
+    snippet = snippet.replaceAll(directory.replaceAll("\\", "/"), replacement);
+    snippet = snippet.replaceAll(directory.replaceAll("\\", "\\\\"), replacement);
+  }
+  return snippet
+    .replace(/\b(?:https?|wss?|file):\/\/[^\s<>"']+/gi, "[url]")
+    .replace(/\bBearer\s+[^\s,;"']+/gi, "Bearer [redacted]")
+    .replace(/(["']?\b(?:authorization|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1[redacted]")
+    .replace(/\bcontrolled-loopback-token\b/g, "[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*\b/g, "[redacted]")
+    .replace(/\b[A-Za-z]:[\\/][^\r\n<>"'|]*/g, "[path]")
+    .replace(/(^|[\s("'=])\/(?:[^/\s"'<>]+\/)*[^/\s"'<>]*/g, "$1[path]")
+    .replace(/\\\\[^\\\s"'<>]+\\[^\r\n<>"'|]*/g, "[path]")
+    .replace(/\s+/g, " ").trim().slice(0, 512);
+}
 function safeError(error) {
   const message = typeof error?.message === "string" ? error.message : "";
   const code = typeof error?.code === "string" && /^(?:ERR_[A-Z_]+|E[A-Z]+|DAEMON_[A-Z_]+)$/.test(error.code)
@@ -54,7 +73,7 @@ function safeError(error) {
     origin?.includes(fileURLToPath(import.meta.url));
   const location = ownedAssertion ? /:(\d+):(\d+)\)?$/.exec(origin) : null;
   let classification = "native_fixture_failure";
-  let assertion = "Native fixture operation failed; see stage, code and message digest";
+  let assertion = "Native fixture operation failed; see stage and redacted message snippet";
   if (code === "ERR_ASSERTION") {
     classification = "fixture_invariant";
     // Only assertions originating here inspect exclusively synthetic inputs and
@@ -71,6 +90,9 @@ function safeError(error) {
   } else if (/^Provider '?kiro-http'? (?:is not configured|is disabled|is not available(?:\. Please ensure the CLI is installed\.)?)$/.test(message)) {
     classification = "native_provider_unavailable";
     assertion = message;
+  } else if (message === "Plugin contribution must return a cleanup function") {
+    classification = "plugin_contribution_contract";
+    assertion = message;
   } else if (message.startsWith("Build failed with ")) {
     classification = "plugin_compilation";
     assertion = "The real fixture plugin failed compilation";
@@ -80,6 +102,7 @@ function safeError(error) {
   }
   return {
     type, ...(code ? { code } : {}), classification, assertion,
+    messageSnippet: safeMessageSnippet(message),
     messageDigest: createHash("sha256").update(message).digest("hex"),
     ...(location ? { source: `test/paseo-reconnect.mjs:${location[1]}:${location[2]}` } : {}),
     ...(error?.cause ? { cause: safeError(error.cause) } : {}),
@@ -91,7 +114,7 @@ const logger = pino({ level: "error" }, {
   write(line) {
     const entry = JSON.parse(line);
     if (entry.msg === "Failed to start built-in plugin" && entry.pluginId === fixturePluginId)
-      pluginFailures.push(safeError(entry.err));
+      pluginFailures.push({ stage: fixtureStage, ...safeError(entry.err) });
   },
 });
 const [{ createPaseoDaemon }, { DaemonClient }] = await Promise.all([
@@ -124,6 +147,7 @@ async function bounded(promise, label, maximum = 10000) {
   assert.ok(remaining > 0, "Reconnect qualification exceeded 105 second deadline");
   try {
     report.stage = label;
+    fixtureStage = label;
     const value = await Promise.race([
       promise,
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), remaining); }),
@@ -243,6 +267,9 @@ export default function contribute(server) {
       return fetch("http://127.0.0.1:${backend.address().port}/", { ...init, redirect: "error" });
     },
   }));
+  // PluginServerContext requires synchronous contribution cleanup. Connections
+  // belong to the real provider runtime and are disposed by its shutdown path.
+  return () => {};
 }
 `);
 
@@ -275,6 +302,7 @@ try {
     },
   } }), "daemon creation");
   await bounded(daemon.start(), "daemon start");
+  report.stage = fixtureStage = "native plugin registration";
   assert.equal(pluginFailures.length, 0, "Native fixture plugin registration failed");
   const providers = await bounded(daemon.agentManager.listProviderAvailability(), "native provider registration");
   assert.ok(providers.some((provider) => provider.provider === "kiro-http" && provider.available),

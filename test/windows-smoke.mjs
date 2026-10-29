@@ -674,7 +674,7 @@ async function smoke() {
       toolResultSeen = false,
       recoverySeen = false,
       searchResultSeen = false,
-      provisionalTextDiscarded = false,
+      acceptedTextRetained = false,
       conversationId,
       finalSent = false;
     const requestSequence = [];
@@ -969,9 +969,10 @@ async function smoke() {
             observeRetry("partial-response-disconnect", partialFailureAt);
             requestSequence.push("generation:recovered-search-tool");
             recoverySeen = true;
-            provisionalTextDiscarded = !JSON.stringify(state).includes(partialText);
-            assert.ok(provisionalTextDiscarded,
-              "Native onRestart must discard provisional text from the retried request history");
+            const prefixCopies = JSON.stringify(state).split(partialText).length - 1;
+            acceptedTextRetained = prefixCopies === 1;
+            assert.equal(prefixCopies, 1,
+              "Native retry must retain the accepted text prefix exactly once in model context");
             response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream" });
             response.end(frame("toolUseEvent", {
               toolUseId: searchToolId,
@@ -1017,7 +1018,7 @@ async function smoke() {
             report.fixtureProgress = {
               generations, catalogs, searchRequests, requestSequence: [...requestSequence],
               retryCadence: [...retryCadence], toolResultSeen, recoverySeen,
-              searchResultSeen, provisionalTextDiscarded,
+              searchResultSeen, acceptedTextRetained,
             };
           }
           if (!response.headersSent) {
@@ -1342,8 +1343,8 @@ async function smoke() {
       transcript.includes("KIRO_PORTABLE_CHAIN_OK"),
       "Final fixture response did not reach the actual Paseo transcript",
     );
-    assert.ok(!transcript.includes(partialText),
-      "Native onRestart must replace provisional text rather than publish a duplicated interrupted response");
+    assert.equal(transcript.split(partialText).length - 1, 1,
+      "Native continuation must retain accepted text without duplicating the interrupted response");
     assert.equal(transcript.split("KIRO_PORTABLE_CHAIN_OK").length - 1, 1,
       "Completed native response must be published exactly once");
     assert.ok(
@@ -1410,7 +1411,7 @@ async function smoke() {
         originalRequestOccursOnceEveryAttempt: true,
         completedWriteCallAndResultOccurOnceInHistory: true,
         completedWriteNotReexecuted: "post-write sentinel survived recovery and final completion",
-        provisionalTextDiscardedOnRestart: provisionalTextDiscarded,
+        acceptedTextRetainedForRetry: acceptedTextRetained,
         noDuplicatePublishedText: true,
       },
       fileSHA256: createHash("sha256").update(guardedFileText).digest("hex"),
