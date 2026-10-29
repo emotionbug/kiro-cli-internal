@@ -2,6 +2,11 @@ name: Portable Windows package
 
 on:
   workflow_dispatch:
+    inputs:
+      fork_run_id:
+        description: Optional owned run with successful fork-source job; source and helper hashes must still match
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -13,6 +18,7 @@ on:
       - "package.json"
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -22,6 +28,7 @@ env:
 
 jobs:
   fork-source:
+    if: ${{ !inputs.fork_run_id }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -51,6 +58,7 @@ jobs:
 
   build:
     needs: fork-source
+    if: ${{ !cancelled() && (needs.fork-source.result == 'success' || (needs.fork-source.result == 'skipped' && inputs.fork_run_id != '')) }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -68,10 +76,31 @@ jobs:
           path: .work/download-cache
           key: windows-portable-${{ hashFiles('build/inputs.json', 'payload/app/package-lock.json') }}
           restore-keys: windows-portable-
+      - name: Authenticate reusable source-job authority
+        if: ${{ inputs.fork_run_id != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK_RUN_ID: ${{ inputs.fork_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FORK_RUN_ID -notmatch '^\d+$') { throw 'Invalid fork source run id' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:FORK_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -ne 'completed' -or
+              $run.path -ne '.github/workflows/portable-windows.yml' -or $run.head_branch -ne 'main' -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) {
+            throw 'Reusable fork must originate from an owned completed main-branch portable run'
+          }
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:FORK_RUN_ID/jobs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($jobs.jobs | Where-Object { $_.name -eq 'fork-source' -and $_.conclusion -eq 'success' }).Count -ne 1) {
+            throw 'Reusable fork source job was not successful'
+          }
       - uses: actions/download-artifact@v4
         with:
           name: portable-paseo-fork
           path: ${{ runner.temp }}/paseo-fork
+          run-id: ${{ inputs.fork_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Assemble pinned direct-only Windows distribution
         shell: pwsh
         run: node build/build-bundle.mjs --output "$env:RUNNER_TEMP\$env:BUNDLE_NAME" --cache "$env:GITHUB_WORKSPACE\.work\download-cache" --paseo-fork "$env:RUNNER_TEMP\paseo-fork"
@@ -88,6 +117,7 @@ jobs:
 
   qualify:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
