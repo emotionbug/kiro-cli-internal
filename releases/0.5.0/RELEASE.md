@@ -55,3 +55,12 @@
 - 실제 Chrome에서 새 포크의 웹 UI와 실제 로드된 production Metro 큐 함수를 실행했습니다. 전달 결과 불명/시간 초과는 큐에 되넣지 않았고 전송되지 않은 것이 알려진 요청만 큐에 남겼습니다. 외부 페이지 요청은 없었습니다. 로그인 이후의 브라우저 조작 전체를 검증한 것은 아닙니다.
 - 완료 에이전트 1개·2초 idle의 애플리케이션 스택은 **working set 합 약 517 MiB, private bytes 합 약 516 MiB**였습니다. 이전 0.4.0의 같은 단계 관측값은 약 827/940 MiB였습니다. 별도 CI 관측 비교이며 브라우저는 제외합니다. working set 합은 공유 페이지를 중복 셀 수 있고 고유 물리 메모리·상한·일반적 성능 보장이 아닙니다.
 - 전용 데몬 종료·반복 종료, 남은 owned 프로세스 0개, `doctor --verify-all`과 전체 파일 목록/내용 불변을 확인했습니다. 개인 fixture는 제거됐습니다.
+
+## 실제 배포 크기·무결성
+
+- ZIP: **299.7 MiB** / **314,289,089 bytes**. 이전 0.4.0의 590.3 MiB / 618,990,213 bytes보다 **49.2% 감소**했습니다.
+- ZIP SHA-256: `9c97a9ba30f1ce4138cfd455f281c9e4bcb1cb9a85c9b134b75556523dba6f42`.
+- ZIP 내부 **21,347개 파일**의 실제 크기·SHA-256, 외부/내부 manifest 일치, 업로드한 자산의 서버 digest를 확인했습니다.
+- [공개 전 전체 ZIP 검증·승격](https://github.com/emotionbug/kiro-cli-internal/actions/runs/40815100551) / [검증 영수증](https://github.com/emotionbug/kiro-cli-internal/releases/download/v0.5.0/release-verification.json).
+
+남은 압축 데이터의 주요 구성은 전체 Git Bash **157.4 MiB**, Paseo 의존성 **43.1 MiB**, 라이선스·소스 고지용 아카이브 **42.7 MiB**, Node **36.3 MiB**입니다. 구성별 수치는 ZIP 헤더/디렉터리 메타데이터를 제외한 실제 compressed entry bytes입니다. 유틸리티와 고지를 삭제하여 줄인 수치가 아닙니다.

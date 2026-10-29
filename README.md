@@ -10,6 +10,8 @@ Paseo는 공개 npm 패키지만 사용하는 대신 **[사용자 포크 `emotio
 
 [Paseo + Kiro HTTP 0.5.0 ZIP·SHA-256·검증 보고서](https://github.com/emotionbug/kiro-cli-internal/releases/tag/v0.5.0)
 
+실제 ZIP은 **299.7 MiB**(314,289,089 bytes)로, 이전 0.4.0의 590.3 MiB보다 **49.2% 감소**했습니다. 모든 내부 파일 21,347개의 크기·SHA-256과 업로드된 자산 digest를 검증한 공개 프리릴리스입니다. [구성별 실제 압축 크기와 검증 영수증](https://github.com/emotionbug/kiro-cli-internal/releases/download/v0.5.0/release-verification.json)에서 확인할 수 있습니다.
+
 1. ZIP 전체를 **새 로컬 폴더**(예: `C:\KiroOffline`)에 풉니다. GitHub의 `Source code.zip`은 실행 패키지가 아닙니다.
 2. `setup.cmd`를 실행하여 동봉 플러그인의 비샌드박스 실행을 검토·승인하고 개인 Paseo 비밀번호를 정합니다.
 3. `auth.cmd login`으로 로그인합니다. device 인증 링크는 다른 승인된 브라우저/기기에서 열어도 됩니다.
