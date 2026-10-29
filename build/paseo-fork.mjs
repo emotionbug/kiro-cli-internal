@@ -29,11 +29,14 @@ export async function materializePaseoFork({ directory, app, output, repo, work,
   }
   const licenses = path.join(output, "LICENSES");
   await mkdir(path.join(licenses, "sources"), { recursive: true });
-  for (const helper of ["build-paseo-fork.mjs", "paseo-reconnect.mjs", "paseo-direct-only.mjs", "paseo-projection-ast.mjs", "metro-export.mjs", "inputs.json"]) {
+  for (const helper of ["build-paseo-fork.mjs", "paseo-reconnect.mjs", "paseo-projection-ast.mjs", "metro-export.mjs", "inputs.json"]) {
     if (await digest(path.join(directory, "source", helper)) !== await digest(path.join(repo, "build", helper)))
       throw new Error(`Fork artifact projection helper changed: ${helper}`);
     await copyFile(path.join(directory, "source", helper), path.join(licenses, "sources", helper));
   }
+  // This transform runs only in the authenticated Windows stage, after source
+  // compilation. It is not an input to the reusable Linux source artifact.
+  await copyFile(path.join(repo, "build/paseo-direct-only.mjs"), path.join(licenses, "sources/paseo-direct-only.mjs"));
   if (!Array.isArray(manifest.packages) || manifest.packages.length !== workspaceNames.length || new Set(manifest.packages.map((item) => item.name)).size !== workspaceNames.length)
     throw new Error("Fork artifact must contain exactly the seven runtime workspace products");
   const overlay = [];

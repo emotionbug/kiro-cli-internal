@@ -341,9 +341,11 @@ export async function pruneProductionClosure(app, lock) {
 }
 
 export function assertDirectOnlyPayload(files) {
-  const forbidden = /(?:^|\/)(?:omp(?:-windows-x64)?|kiro(?:-cli)?|claude(?:-code)?|codex|wezterm(?:-gui|-mux-server)?|opencode|copilot|cursor-agent|pi|traecli|sherpa[^/]*|espeak(?:-ng)?|piper|whisper)(?:\.(?:exe|cmd|bat|com)|$)/i;
+  const forbidden = /(?:^|\/)(?:omp(?:-windows-x64)?|kiro(?:-cli)?|claude(?:-code)?|codex|wezterm(?:-gui|-mux-server)?|opencode|copilot|cursor-agent|pi|traecli|sherpa[^/.]*|espeak(?:-ng)?|piper|whisper)(?:\.(?:exe|cmd|bat|com)|$)/i;
   for (const file of files) {
-    if (forbidden.test(file.path) || /(?:^|\/)(?:sherpa-onnx[^/]*|@anthropic-ai|@opencode-ai)(?:\/|$)/i.test(file.path))
+    if (forbidden.test(file.path) ||
+        /(?:^|\/)node_modules\/(?:sherpa-onnx[^/]*|@anthropic-ai|@opencode-ai)(?:\/|$)/i.test(file.path) ||
+        /\/server\/speech\/.*\.(?:onnx|dll|node|exe|bin|wasm)$/i.test(file.path))
       throw new Error(`Forbidden non-Kiro-HTTP runtime in payload: ${file.path}`);
   }
   return { rejected: ["OMP", "Kiro CLI", "Claude CLI/SDK", "Codex", "WezTerm", "OpenCode", "other provider CLI", "native voice runtime"], scope: "Every staged path; kiro-proxy.exe is the retained WinHTTP/SSPI helper, not Kiro CLI" };
