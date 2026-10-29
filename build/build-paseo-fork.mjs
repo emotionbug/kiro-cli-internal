@@ -90,12 +90,24 @@ async function inventory(directory, relative = "") {
   }
   return files;
 }
-async function assertSafeArchive(file, prefix) {
-  const members = (await run("tar", ["-tzf", file], { cwd: work, capture: true })).trim().split("\n");
+async function assertSafeArchive(file, prefix, { allowInternalLinks = false } = {}) {
+  const members = (await run("tar", ["--quoting-style=literal", "-tzf", file], { cwd: work, capture: true })).trim().split("\n");
   if (!members.length || members.some((name) => !name.startsWith(`${prefix}/`) || name.includes("\\") || name.split("/").some((part) => part === "..")))
     throw new Error("Unsafe or unexpected fork archive members");
-  const types = (await run("tar", ["-tvzf", file], { cwd: work, capture: true })).trim().split("\n");
-  if (types.some((line) => !["-", "d"].includes(line[0]))) throw new Error("Fork archive contains links or special files");
+  const types = (await run("tar", ["--quoting-style=literal", "-tvzf", file], { cwd: work, capture: true })).trim().split("\n");
+  if (types.length !== members.length) throw new Error("Fork archive inventory is ambiguous");
+  for (let index = 0; index < types.length; index++) {
+    const line = types[index];
+    if (line[0] === "-" || line[0] === "d") continue;
+    if (!allowInternalLinks || line[0] !== "l") throw new Error("Fork archive contains unsupported links or special files");
+    const marker = ` ${members[index]} -> `;
+    const at = line.indexOf(marker);
+    if (at < 0 || at !== line.lastIndexOf(marker)) throw new Error("Fork source link metadata is ambiguous");
+    const target = line.slice(at + marker.length);
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(members[index]), target));
+    if (!target || path.posix.isAbsolute(target) || target.includes("\\") || !resolved.startsWith(`${prefix}/`))
+      throw new Error("Fork source link escapes its immutable archive");
+  }
 }
 try {
   try { await access(archive); }
@@ -117,7 +129,7 @@ try {
     await rename(partial, archive);
   }
   if (await digest(archive) !== pin.sha256) throw new Error("Cached fork source SHA-256 mismatch");
-  await assertSafeArchive(archive, `paseo-${pin.commit}`);
+  await assertSafeArchive(archive, `paseo-${pin.commit}`, { allowInternalLinks: true });
   await mkdir(sourceRoot);
   await run("tar", ["-xzf", archive, "--strip-components=1", "-C", sourceRoot], { cwd: work });
   const rootManifest = JSON.parse(await readFile(path.join(sourceRoot, "package.json"), "utf8"));
