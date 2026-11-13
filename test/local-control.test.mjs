@@ -26,7 +26,8 @@ test("private daemon connections bypass inherited Node environment proxies", asy
   const root = path.join(tmpdir(), "kiro-loopback-fixture");
   const state = {
     root,
-    home: path.join(root, "paseo"),
+    home: path.join(root, "passession"),
+    ompDir: path.join(root, "omp"),
     authFile: path.join(root, "auth.sqlite3"),
     config: { nodeHeapMb: 128 },
   };

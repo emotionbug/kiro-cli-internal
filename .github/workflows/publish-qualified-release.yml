@@ -19,7 +19,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       QUALIFIED_RUN_ID: ${{ inputs.qualified_run_id }}
-      BUNDLE_NAME: kiro-paseo-http-0.5.0-windows-x64
+      BUNDLE_NAME: kiro-passession-omp-http-0.6.0-windows-x64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,16 +63,21 @@ jobs:
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
           $report = Get-Content -LiteralPath (Join-Path $reportRoot 'report.json') -Raw | ConvertFrom-Json
           if ($manifest.target -ne 'win32-x64' -or $manifest.archive.filename -ne $zipName -or
+              $manifest.packageVersion -ne '0.6.0' -or
               -not $manifest.proxy.validation.memory.budgetPassed -or $manifest.compatibility.server2019Verified -or
               $report.result -ne 'passed' -or -not $report.privateFixturesRemoved -or
-              $report.chain.provider -ne 'kiro-http' -or
-              $report.cleanup.ownedStackProcessesRemaining -ne 0 -or
-              $report.applicationProxyViolations.count -ne 0 -or $report.webUi.blockedExternalPageRequests -ne 0) {
-            throw 'Qualification report or manifest does not satisfy the release contract'
+              $report.chain.provider -ne 'kiro-http' -or $report.chain.engine -ne 'omp' -or
+              -not $report.chain.persistedResume -or -not $report.chain.completedWriteNotRepeated -or
+              -not $report.cleanup.foregroundLauncherExited -or -not $report.cleanup.bundleUnchanged -or
+              $report.cleanupFailed -or $report.applicationProxyViolations.count -ne 0) {
+            throw 'Qualification report or manifest does not satisfy the native OMP release contract'
           }
-          if ($manifest.paseoFork.source.commit -ne 'c3bac24ccc2df8dcc67d807c805db0efa0817dff' -or
-              $manifest.paseoFork.source.sha256 -ne 'f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff') {
-            throw 'Release must contain the pinned latest emotionbug/paseo fork, including its web UI'
+          $pins = (Get-Content -LiteralPath 'build/inputs.json' -Raw | ConvertFrom-Json).assets
+          foreach ($pin in $pins.PSObject.Properties) {
+            $actual = $manifest.inputs.PSObject.Properties[$pin.Name].Value
+            if ($actual.sha256 -ne $pin.Value.sha256 -or $actual.url -ne $pin.Value.url) {
+              throw "Qualified input differs from the release recipe: $($pin.Name)"
+            }
           }
           $checksum = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
           if ($checksum.Count -ne 2 -or $checksum[0] -notmatch '^[0-9a-f]{64}$' -or $checksum[1] -ne $zipName) {
@@ -85,9 +90,9 @@ jobs:
             if ($file.path -match '(^/|\\|(^|/)\.\.(/|$)|:)') { throw 'Unsafe manifest member path' }
             if ($file.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Invalid member digest' }
             $expected.Add($file.path, $file)
-            if ($file.path -match '^(?:runtime/(?:omp|terminal)/|omp\.cmd$)' -or
-                $file.path -match '(?:^|/)(?:omp|kiro-cli|claude|codex|wezterm(?:-gui|-mux-server)?)\.exe$') {
-              throw 'A direct-only release must not contain agent CLIs or an external terminal'
+            if ($file.path -match '(?:^|/)(?:kiro-cli|claude|codex|wezterm(?:-gui|-mux-server)?)\.exe$' -or
+                $file.path -match 'node_modules/@getpaseo/') {
+              throw 'The native OMP release must not contain the retired JS Paseo or unrelated agent CLIs'
             }
           }
           $expected.Add('bundle-manifest.json', [pscustomobject]@{
@@ -125,10 +130,6 @@ jobs:
               $byComponent[$component].compressedBytes += $entry.CompressedLength
             }
           } finally { $hasher.Dispose(); $archive.Dispose() }
-          $image = Join-Path $reportRoot 'web-ui.png'
-          if ((Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant() -ne $report.webUi.screenshotSHA256) {
-            throw 'Qualified browser evidence digest mismatch'
-          }
           $verificationPath = Join-Path $root 'release-verification.json'
           [ordered]@{
             schemaVersion = 1
@@ -144,9 +145,7 @@ jobs:
             verification = 'Streamed SHA-256 and size of every ZIP member, including exact external manifest bytes; no target execution'
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $verificationPath -Encoding utf8
           $assets = @($zipPath, $checksumPath, $manifestPath, $verificationPath,
-            (Join-Path $reportRoot 'report.json'), (Join-Path $reportRoot 'reconnect.json'),
-            (Join-Path $reportRoot 'utilities.json'), $image,
-            (Join-Path $env:GITHUB_WORKSPACE 'releases/0.4.0/kiro-web-search-observation.json'))
+            (Join-Path $reportRoot 'report.json'), (Join-Path $reportRoot 'utilities.json'))
           $assetDigests = @{}
           foreach ($asset in $assets) {
             $name = [IO.Path]::GetFileName($asset)
@@ -154,11 +153,11 @@ jobs:
               'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
             }
           }
-          $notes = Get-Content -LiteralPath 'releases/0.5.0/RELEASE.md' -Raw
+          $notes = Get-Content -LiteralPath 'releases/0.6.0/RELEASE.md' -Raw
           $notes += "`n## 배포 무결성`n- ZIP SHA-256: ``$zipSha```n- ZIP bytes: $((Get-Item -LiteralPath $zipPath).Length)`n- 내부 파일 $($seen.Count)개를 스트리밍 SHA-256으로 재검증했습니다.`n- 검증한 소스: ``$env:QUALIFIED_SOURCE_SHA```n- [Windows 전체 검증](https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:QUALIFIED_RUN_ID)`n"
           $notesPath = Join-Path $root 'release-notes.md'
           [IO.File]::WriteAllText($notesPath, $notes)
-          $tag = 'v0.5.0'
+          $tag = 'v0.6.0'
           $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release drafts' }
           $existing = @($releases | Where-Object { $_.tag_name -eq $tag })
@@ -178,7 +177,7 @@ jobs:
             throw 'Release tag does not bind the qualified source commit'
           }
           if ($existing.Count -eq 0) {
-            gh release create $tag @assets --draft --prerelease --target $env:QUALIFIED_SOURCE_SHA --title 'Paseo + Kiro HTTP 0.5.0 · Windows x64 portable' --notes-file $notesPath
+            gh release create $tag @assets --draft --prerelease --target $env:QUALIFIED_SOURCE_SHA --title 'Passession + OMP + Kiro HTTP 0.6.0 · Windows x64 portable' --notes-file $notesPath
             if ($LASTEXITCODE -ne 0) { throw 'Release draft creation/upload failed; no existing release is overwritten' }
             $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0) { throw 'Cannot read uploaded release draft' }

@@ -1,16 +1,18 @@
 # 배포 파일 정보 점검
 
-## Paseo + OMP + Kiro HTTP 0.4.0
+## Passession + OMP + Kiro HTTP 0.6.0
 
 새 배포물은 `build/inputs.json`과 npm lock의 공개·해시 고정 입력 및 저장소 `payload/`만으로 조립합니다. 호스트의 OMP/Paseo 설치, Kiro CLI 인증 DB, 사용자 설정·대화·로그·회사 PAC를 복사하지 않습니다.
 
 - 조립기는 source payload의 인증 DB·환경 파일·node_modules 혼입, literal credential 및 빌드 호스트 경로를 거부합니다. 최종 manifest는 파일별 SHA-256과 공개 다운로드 출처/SRI를 기록합니다.
-- 새 HTTP 패키지에는 Kiro CLI, 프록시용 Python/Px 스택, 가짜 DXCore/DirectML DLL을 포함하지 않습니다. 도구용 Python 표준 라이브러리 런타임·rg·jq는 별도의 공개 입력으로 동봉합니다. native proxy는 이 저장소 C++ 소스에서 컴파일하며 공개 소스·빌드 인자·직접 DLL/API import 목록을 포함합니다.
-- 배포 ZIP은 로그인 전에 만들고 테스트 사용자 데이터는 ZIP 밖의 임시 경로에 생성합니다. 테스트용 OAuth 토큰·TLS 개인키·브라우저 프로필·Paseo 비밀번호·회사 설정을 artifact에 넣지 않습니다.
-- CI가 보존하는 qualification 자료는 비밀값/호스트 작업 경로를 제외한 `report.json`, `utilities.json` 및 비로그인 웹 UI 스크린샷뿐입니다. 단위 테스트의 SSPI 서버 EXE와 토큰은 배포하지 않습니다.
+- 새 HTTP 패키지에는 Kiro CLI, 프록시용 Python/Px 스택, 가짜 DXCore/DirectML DLL을 포함하지 않습니다. 공식 Passession 앱·Rust 데몬·OMP standalone·Node·Python 표준 라이브러리·rg·jq·전체 Git Bash를 공개 고정 입력으로 동봉합니다. native proxy는 이 저장소 C++ 소스에서 컴파일하며 공개 소스·빌드 인자·직접 DLL/API import 목록을 포함합니다.
+- 배포 ZIP은 로그인 전에 만들고 테스트 사용자 데이터는 ZIP 밖의 임시 경로에 생성합니다. 테스트용 OAuth 토큰·TLS 개인키·Passession 비밀번호·회사 설정을 artifact에 넣지 않습니다.
+- CI가 보존하는 qualification 자료는 비밀값/호스트 작업 경로를 제외한 `report.json`과 `utilities.json`입니다. 단위 테스트의 SSPI 서버 EXE와 토큰은 배포하지 않습니다. 네이티브 CLI 결과를 데스크톱 UI 검증으로 바꾸어 표시하지 않습니다.
 - 대상 PC의 `%LOCALAPPDATA%\KiroInternal`에는 개인 인증 SQLite·설정·목록·Paseo/OMP 기록이 생성됩니다. 생성 시 현재 사용자와 SYSTEM만 허용하는 ACL을 설정합니다. 패키지 자체, Windows 계정 자격증명 저장소, 브라우저 데이터 및 OS 캐시 전체를 하나의 데이터 폴더에 격리한다고 주장하지 않습니다.
 - private proxy는 루프백에만 열며 per-launch 임시 인증값을 부모 stdin으로 받습니다. 이 값은 명령행·설정 파일·회사 upstream 요청에 전달하지 않습니다. 회사 SSPI 인증 토큰과 로그인 자격증명은 로그에 출력하지 않습니다.
 - Bun용 `proxy/trust-*.pem`은 Windows 신뢰 저장소 및 선택한 PEM의 **공개 인증서**만 포함합니다. 인증서 개인키를 내보내거나 시스템 신뢰 저장소를 변경하지 않습니다.
+- `--data-dir`가 사용자 홈과 다른 드라이브면 OMP의 부가 캐시·로그·worktree·런타임 상태는 홈의 `.kiro-internal-omp/<데이터 경로 해시>`에 생성됩니다. 계정·설정·모델·세션은 지정 데이터 폴더의 `omp/agent`에 유지하며 기존 `~/.omp`를 사용하지 않습니다.
+- Passession 데스크톱 upstream은 실행 시 HKCU toast/AUMID 및 CLSID `LocalServer32` 등록을 자기 실행 파일로 갱신합니다. 설치된 Paseo Sessions의 알림 활성화 대상이 바뀔 수 있으며 완전한 레지스트리 무변경 포터블 앱은 아닙니다. 해당 변경을 피하려면 `start.cmd --no-app`과 CLI를 사용합니다.
 
 빌드 manifest와 ZIP SHA-256으로 확인할 수 있는 조립 범위이며, 모든 형태의 비밀 정보가 없다는 수학적 보증이나 공급망 인증은 아닙니다. 공식 upstream 바이너리 자체의 일반 빌드 경로·테스트 fixture·암호화 라이브러리 문자열은 사용자/회사 데이터와 구분해야 합니다. 실행 후 폴더를 재압축해 공유하지 말고 원본 배포 ZIP을 사용하세요.
 

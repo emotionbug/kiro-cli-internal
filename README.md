@@ -1,133 +1,76 @@
-# Kiro Internal — Paseo + Kiro HTTP
+# Kiro Internal — Passession + OMP + Kiro HTTP
 
-Windows x64용 **오프라인 설치 패키지**입니다. 경로는 `Paseo 웹 UI → Kiro HTTP 플러그인 → Kiro 서비스`입니다. **OMP·WezTerm·Kiro CLI·Claude CLI는 필요하지 않으며 배포하지 않습니다.** `omp-kiro`는 재사용하는 플러그인 프로젝트 이름이지 OMP 실행 파일 의존성을 뜻하지 않습니다.
+Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브 앱 → OMP → Kiro HTTP → Windows 시스템/PAC/SSPI 프록시 → Kiro 서비스**로 구성합니다. Python 표준 라이브러리·ripgrep·jq·전체 Git Bash도 유지합니다.
 
-Paseo는 공개 npm 패키지만 사용하는 대신 **[사용자 포크 `emotionbug/paseo@c3bac24`](https://github.com/emotionbug/paseo/commit/c3bac24ccc2df8dcc67d807c805db0efa0817dff)의 서버·CLI·관련 workspace·웹 UI를 함께 빌드**합니다. 세션 중심 탐색, diff 초기 표시/스크롤 최적화, 브라우저 자동화 지연 시작 변경을 포함합니다. 포크의 내부 버전 표시는 0.13.0이며, 실제 소스 커밋은 `doctor.cmd`와 `bundle-manifest.json.paseoFork`에서 확인합니다. 로컬 사용자 저장소의 변경이나 실행 중인 Paseo를 수정·재시작하지 않습니다.
+0.6.0은 과거 JavaScript Paseo 서버·웹 UI를 공식 Passession Rust 앱·데몬으로 교체하고 OMP 제공자에 HTTP 플러그인을 연결합니다. OMP를 제외했던 0.5.0과 다른 실행 구조입니다. Kiro CLI·WezTerm·Electron·별도 브라우저 엔진은 필요하지 않습니다.
 
-> 설치·기동에는 외부 다운로드가 필요하지 않습니다. 로그인·목록·사용량·검색·응답 생성에는 Kiro/인증 서비스로 연결되는 승인된 HTTPS 프록시·게이트웨이가 필요합니다. 그 경로까지 차단된 완전 망 분리에서는 클라우드 기능을 사용할 수 없습니다. 검색 대상 웹사이트에는 PC가 직접 접속하지 않고 Kiro 서버에 검색을 맡깁니다.
+> 설치·기동에는 외부 다운로드가 없습니다. 로그인·목록·사용량·검색·추론에는 승인된 HTTPS 연결이 필요합니다. 완전 망 분리에서는 Kiro 클라우드를 사용할 수 없습니다. 실행 시 최신판을 내려받는 방식이 아니라, 확인한 최신 안정판을 해시로 고정합니다.
 
-## 다운로드와 실행
+## 0.6.0 구성
 
-[Paseo + Kiro HTTP 0.5.0 ZIP·SHA-256·검증 보고서](https://github.com/emotionbug/kiro-cli-internal/releases/tag/v0.5.0)
+| 구성요소 | 버전·출처 |
+|---|---|
+| Passession 네이티브 앱·데몬 | [0.13.15](https://github.com/emotionbug/Passession/releases/tag/v0.13.15), `428a5f68f5683d9a63a90d506909568e60093e6b` |
+| OMP standalone | [18.20.0](https://github.com/can1357/oh-my-pi/releases/tag/v18.20.0) |
+| `omp-kiro` HTTP 플러그인 | 0.4.8, [`8056e05`](https://github.com/emotionbug/omp-kiro/commit/8056e05380e545afed6a093a1e6e550b4a59fd0d) |
+| Node.js LTS | 26.13.1 |
+| Python 표준 라이브러리 | 3.15.2 |
+| ripgrep / jq | 15.2.0 / 1.8.2 |
+| 전체 Git for Windows·Git Bash | 2.56.1.windows.1 |
+| 프록시 | 저장소 C++ 소스로 빌드하는 WinHTTP·SSPI helper |
 
-실제 ZIP은 **299.7 MiB**(314,289,089 bytes)로, 이전 0.4.0의 590.3 MiB보다 **49.2% 감소**했습니다. 모든 내부 파일 21,347개의 크기·SHA-256과 업로드된 자산 digest를 검증한 공개 프리릴리스입니다. [구성별 실제 압축 크기와 검증 영수증](https://github.com/emotionbug/kiro-cli-internal/releases/download/v0.5.0/release-verification.json)에서 확인할 수 있습니다.
+입력 URL·SHA-256은 `build/inputs.json`, npm 의존성은 `payload/app/package-lock.json`, 출력 파일별 해시는 ZIP의 `bundle-manifest.json`에 있습니다. 데스크톱 공식 NSIS 배포물에서 필요한 네이티브 실행 파일·런타임·리소스·고지를 추출하고 설치기/제거기는 배포하지 않습니다. 7-Zip은 빌드 도구이며 사용자 패키지에 넣지 않습니다. Passession의 `flutter-*.json` 피드 이름은 호환성 식별자이지 현재 UI 기술이 아닙니다.
 
-1. ZIP 전체를 **새 로컬 폴더**(예: `C:\KiroOffline`)에 풉니다. GitHub의 `Source code.zip`은 실행 패키지가 아닙니다.
-2. `setup.cmd`를 실행하여 동봉 플러그인의 비샌드박스 실행을 검토·승인하고 개인 Paseo 비밀번호를 정합니다.
-3. `auth.cmd login`으로 로그인합니다. device 인증 링크는 다른 승인된 브라우저/기기에서 열어도 됩니다.
-4. `start.cmd`를 실행합니다. 기존 승인된 최신 Edge/Chrome에서 `http://127.0.0.1:16767`을 열고 첫 화면의 **Direct connection**에서 `127.0.0.1:16767` 서버를 등록한 뒤 개인 비밀번호로 접속합니다.
-5. **Kiro HTTP** 제공자로 새 세션을 만듭니다. 모델은 실제 로그인 계정의 메타데이터만 사용합니다.
-6. 종료는 `stop.cmd`입니다. 전용 데몬만 종료하며 일반 Paseo의 6767 포트나 다른 OMP/Paseo 프로세스는 중지하지 않습니다.
+`app/omp-network-policy.json`은 같은 OMP 버전의 정적 카탈로그와 동적 제공자 레지스트리에서 생성합니다. Kiro 외 기본 제공자의 자동 모델 탐색과 OMP 시작 시 업데이트 확인·자동 업데이트·marketplace 갱신을 끕니다. 불필요한 외부 조회를 숨기거나 프록시 허용목록을 넓히는 대신 조회 원인을 비활성화합니다. 사용자가 실행하는 Git·MCP·네트워크 도구를 막는 방화벽은 아닙니다.
 
-기본 수신은 `127.0.0.1:16767` 로컬 전용입니다. 패키지가 전달한 데몬 주소가 비밀번호를 요구하거나 연결에 실패해도 다른 `localhost:6767` 인스턴스로 대신 연결하지 않습니다.
+## 실행
 
-```bat
-auth.cmd login --provider google
-auth.cmd login --provider github
-auth.cmd login --provider builder-id
-auth.cmd login --provider identity-center --start-url https://YOUR-ORGANIZATION.awsapps.com/start
-auth.cmd status
-models.cmd
-usage.cmd
-doctor.cmd --verify-all
-```
+1. 빌드된 `kiro-passession-omp-http-0.6.0-windows-x64.zip`을 **새 폴더**에 풉니다. GitHub Source code ZIP은 실행 패키지가 아닙니다.
+2. `setup.cmd`에서 비샌드박스 플러그인 실행을 검토·승인하고 개인 데몬 비밀번호를 정합니다.
+3. 필요한 경우 `network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem` 등으로 승인된 네트워크를 설정합니다.
+4. `auth.cmd login`으로 직접 로그인하고 `models.cmd`로 계정 모델 목록을 갱신합니다.
+5. `start.cmd`로 전용 데몬과 Passession 앱을 실행합니다. 앱에서 **Kiro HTTP** 제공자와 실제 계정 모델을 선택합니다.
+6. 데몬 종료는 `stop.cmd`입니다. 데스크톱 창은 별도로 닫습니다. 다른 Passession/Paseo/OMP 프로세스를 일괄 종료하지 않습니다.
 
-이미 CLI social 로그인을 가진 경우에만 `auth.cmd import-cli`로 선택적으로 가져올 수 있습니다. 원본은 호출 사용자의 홈 아래 `.local\share\kiro-cli\data.sqlite3`이며 `--database C:\Path\data.sqlite3`로 지정할 수도 있습니다. 원본 DB는 읽기 전용이나 refresh token의 회전·폐기는 원래 세션과 공유될 수 있으므로 독립적인 `auth.cmd login`을 권장합니다. 이 기능은 Kiro CLI를 설치하거나 실행하지 않습니다.
+네이티브 앱 없이 사용할 때는 `start.cmd --no-app`과 `paseo.cmd`, OMP 터미널을 직접 사용할 때는 `omp.cmd`입니다. 모델 ID는 **`kiro-http/<실제 모델 ID>`**입니다. `auto`도 계정 목록에 있을 때만 사용하며 임의 모델·다른 전송 방식으로 fallback하지 않습니다. `usage.cmd`는 계정 할당량을 조회합니다.
 
-### 모델·사용량·도구
+전용 데몬은 기본 `127.0.0.1:16767`만 사용합니다. 웹 UI 주소가 아니며 공개 인터페이스로 노출하지 않습니다. 모든 명령에 동일한 `--data-dir 절대경로`를 지정하여 기본 `%LOCALAPPDATA%\KiroInternal` 대신 별도 사용자 데이터를 사용할 수 있습니다. 원래 HOME/USERPROFILE·Git/SSH 설정은 유지하고 시스템 PATH·프록시·인증서 저장소는 변경하지 않습니다.
 
-`models.cmd`는 계정에 결합된 실제 모델 스냅샷과 Paseo 카탈로그를 갱신합니다. 시작 시 스냅샷을 사용하므로 일시적인 목록 조회 실패로 선택 모델을 지우거나 다른 모델로 바꾸지 않습니다. 임의 모델을 만들어 넣거나 생성 요청으로 모델을 추측하지 않습니다. 모델 ID는 계정의 원래 ID이며 OMP용 `kiro-http/` 접두어를 붙이지 않습니다. 갱신한 목록은 새 세션에 반영합니다.
+**상세 실행·인증·Identity Center 프로필·프록시·모드·유틸리티 설명은 [동봉 사용자 안내](payload/README.ko.md)**에 있습니다. 개인정보 취급 범위는 [PRIVACY.md](PRIVACY.md)를 참조하세요.
 
-계정 변경은 이전 스냅샷을 무효화합니다. 프로필 ARN 없는 인증에서 refresh token이 회전한 경우에도 `models.cmd`로 결합을 갱신해야 합니다. 인증된 비어 있지 않은 스냅샷 없이 기본 제공자를 활성화하지 않습니다. 사용량은 계정 할당량이며 개별 세션의 토큰 소비량이 아닙니다.
+### 프록시와 재시도
 
-**기본 도구 정책은 사용자가 선택한 Full access**입니다. 파일 수정·삭제·명령 실행을 건별 승인 없이 사용자 권한으로 수행합니다. 최초 플러그인 신뢰·로그인은 별도이며 명시적으로 선택한 Ask/Plan은 유지합니다. 모델에 도구 선택이나 Python 사용 제한 지침을 추가하지 않습니다.
+- 시스템/PAC 모드는 목적지별 DIRECT/프록시·내부 주소 예외를 사용하며 내부 API·Git·MCP를 Kiro 도메인으로 제한하지 않습니다. 수동 고정 프록시는 내부 주소도 전달하므로 내부 예외가 필요하면 시스템/PAC를 사용하세요.
+- upstream 인증은 현재 Windows 사용자의 SSPI Negotiate/NTLM입니다. HTTP/CONNECT·HTTP(S)/로컬 PAC를 지원하며 SOCKS·HTTPS upstream·PAC 다음 프록시로 자동 failover는 지원하지 않습니다. TLS/호스트명 검증을 해제하지 않습니다.
+- Kiro HTTP의 일시적 오류는 취소 전까지 30초 간격으로 복구하고 더 긴 `Retry-After`를 지킵니다. 선택 모델·대화 ID·완료된 도구 결과·기존 텍스트를 유지합니다. 인증·권한·인증서·할당량 오류는 무한 재시도로 숨기지 않습니다. 이미 수신된 요청의 과금이나 exactly-once를 보장하지 않습니다.
+- 네이티브 Passession 연결 복구는 해당 upstream 구현을 따릅니다. 과거 웹 UI의 고정 30초 재접속 패치를 이식했다고 주장하지 않습니다.
+- `web_search`는 같은 Kiro 인증으로 `/mcp`를 호출하고 출처·인용·재현 제한을 보존합니다. 반환된 사이트 본문을 자동으로 가져오거나 다른 검색 서비스로 fallback하지 않습니다. OMP의 다른 도구에 대한 네트워크 차단 기능은 아닙니다.
 
-### 폐쇄망의 웹 검색
+### 유틸리티와 이전 데이터
 
-기본 `web_search`는 별도 검색 API 키 없이 **같은 Kiro 인증으로 `runtime.<region>.kiro.dev/mcp`에 요청**합니다. 인터넷 검색은 Kiro 서버가 수행합니다. PC는 반환된 출처 URL을 자동으로 열거나 본문을 다운로드하지 않으며 Exa·Brave 등 외부 검색 서비스로 fallback하지 않습니다.
+Python(`python`·`python3`)·rg·jq·전체 Git Bash를 런처의 자식 PATH에 제공합니다. 활성 virtualenv/Conda를 우선하고 시스템 PATH는 변경하지 않습니다. Python은 격리된 표준 라이브러리 도구이며 pip/ensurepip/Tk·과학 패키지·완전한 개발 환경을 포함하지 않습니다. stdio는 UTF-8, 일반 파일 인코딩은 명시하세요.
 
-출처·인용 ID·`maxVerbatimWordLimit` 같은 재현 제한을 보존합니다. 검색 결과/발췌이지 전체 페이지 본문 도구가 아닙니다. 실제 계정의 원격 도구 목록에는 `web_search`만 있었으므로 `web_fetch`를 지원한다고 가정하지 않습니다.
+기존 0.5 직접 HTTP 대화를 OMP 대화로 자동 변환하지 않습니다. 새 네이티브/OMP 상태를 분리하고 기존 파일·인증·다른 설치를 삭제하지 않습니다. 과거 대화 재개가 필요하면 [0.5.0 원본](https://github.com/emotionbug/kiro-cli-internal/releases/tag/v0.5.0)을 보관하세요. 새 ZIP을 기존 설치에 덮어 풀지 마세요.
 
-[실제 Kiro 검색 관측 발췌](releases/0.4.0/kiro-web-search-observation.json)에서 검색 10건과 출처/재현 제한을 확인했습니다. 이 기존 관측은 대상 회사망 연결이나 사용량 한도가 소진된 계정의 응답 생성을 검증한 것이 아닙니다.
+다른 드라이브의 `--data-dir`를 사용하면 OMP의 부가 캐시·로그·worktree는 홈의 별도 `.kiro-internal-omp\<경로 해시>`에 저장합니다. 기존 `~\.omp`는 사용하지 않습니다. 네이티브 GUI는 Windows 세션당 한 인스턴스이며 **시작 시 HKCU 알림 등록을 자신의 EXE로 갱신**하여 설치된 Paseo Sessions의 알림 활성화 대상에 영향을 줄 수 있습니다. 레지스트리 변경이 허용되지 않으면 `--no-app`과 CLI를 사용하세요.
 
-### 연결 단절과 재시도
+## 빌드와 검증
 
-- 인터넷·DNS·소켓 단절과 일시적 HTTP 오류는 사용자 취소 전까지 **30초 고정 주기**로 재시도합니다. 서버의 더 긴 `Retry-After`는 지킵니다.
-- 선택 모델과 대화 ID를 유지합니다. 이미 표시한 텍스트를 모델 문맥에 한 번 보존하고 이어받으므로 Paseo의 추가형 스트림에서 임시 텍스트를 지우거나 중복해서 붙이지 않습니다. 도구는 완전하고 유효한 응답 이후 실행하며 완료된 도구 결과를 유지하고 자동 재시도로 도구를 처음부터 재실행하지 않습니다.
-- Paseo 웹 연결도 첫 시도부터 30초 주기로 연결·구독·내역을 복구합니다. **수락 여부가 불명확한 프롬프트는 자동 재전송하지 않습니다.**
-- 잘못된 인증·권한·인증서·할당량·프로토콜 오류는 무한 재시도로 숨기지 않습니다. OAuth 일회용 교환/refresh는 성공 여부를 모르는 응답 유실을 무조건 재전송하지 않습니다.
-- 서비스에 도착한 생성 요청은 응답이 유실돼도 과금될 수 있습니다. 클라우드의 exactly-once/idempotency를 보장하지 않습니다.
-
-### 내부망·PAC·인증
-
-```bat
-network.cmd
-network.cmd --mode system
-network.cmd --mode manual --proxy http://PROXY-HOST:8080
-network.cmd --mode manual --pac C:\ApprovedConfig\proxy.pac
-network.cmd --mode direct
-network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem
-```
-
-네트워크 변경 전에는 이 데몬을 중지합니다. 기본값은 현재 Windows 사용자의 시스템/PAC 설정입니다. 주소·계정은 배포물에 미리 넣지 않습니다. 프록시 URL에 사용자명/비밀번호를 넣지 않으며 upstream 인증은 현재 Windows 사용자의 SSPI Negotiate/NTLM을 사용합니다. TLS/호스트명 검증을 유지하며 시스템 프록시·인증서 저장소는 변경하지 않습니다.
-
-**내부망은 차단하지 않습니다.** 시스템/PAC 모드는 목적지별 DIRECT/프록시와 Windows 시스템 프록시의 내부 주소 예외를 사용합니다. 내부 API·Git·MCP를 Kiro 도메인으로 제한하지 않습니다. 수동 고정 프록시는 내부 주소도 그 프록시를 경유하므로 내부망 예외가 필요하면 시스템/PAC 모드를 사용하세요. 승인된 사설 CA를 추가할 수 있습니다.
-
-지원 범위는 HTTP upstream, HTTP/CONNECT, Windows 시스템 설정, HTTP(S)/로컬 파일 PAC입니다. PAC 오류를 DIRECT로 숨기지 않으며 SOCKS·HTTPS upstream·두 번째 프록시로 자동 failover는 제공하지 않습니다. PAC 파일 서버에는 인증을 위임하지 않으므로 인증이 필요한 경우 승인된 로컬 PAC 파일을 사용하세요. HTTPS CONNECT의 PAC는 전체 암호화 경로가 아닌 호스트/포트 기준입니다.
-
-승인 검토의 시작 목록은 `prod.us-east-1.auth.desktop.kiro.dev`, `runtime.us-east-1.kiro.dev`, `management.us-east-1.kiro.dev`이며 계정에 따라 `eu-central-1` runtime/management를 사용합니다. Builder ID/Identity Center는 지정 region의 `oidc.<region>.amazonaws.com`도 사용합니다. 브라우저는 `app.kiro.dev`, `view.awsapps.com`/조직 AWS SSO 및 선택한 Google/GitHub/기업 IdP 리디렉션이 필요할 수 있습니다. 모든 IdP를 포괄하는 허용목록은 아닙니다.
-
-HOME/USERPROFILE은 호출 사용자의 원래 값을 유지하므로 기존 Git/SSH 설정을 사용할 수 있습니다. Paseo home·인증·모델 스냅샷은 `%LOCALAPPDATA%\KiroInternal`의 명시적인 전용 경로에 저장하고 사용자+SYSTEM ACL로 보호합니다. 다른 경로는 각 명령에 동일한 `--data-dir 절대경로`를 지정하세요. 인증 SQLite나 사용한 데이터 폴더를 재배포하지 마세요.
-
-네이티브 대화 기록은 같은 전용 데이터 폴더의 `.local\state\omp-kiro\paseo`에 저장합니다. `XDG_STATE_HOME`만 개인 경로로 고정하므로 HOME을 바꾸지 않고도 기록이 다른 설치와 섞이는 것을 방지합니다.
-
-실제 회사 내부 주소·PAC·SSPI·AppLocker/WDAC·서명 정책은 현장 승인이 필요합니다. CI에서 외부망을 막기 위한 브라우저 플래그는 배포 실행기에 넣지 않습니다.
-
-### 동봉 유틸리티와 메모리
-
-Python 3.13.12 표준 라이브러리(`python.exe`·`python3.exe`), ripgrep 15.1.0, jq 1.8.1 및 **전체 Git Bash**를 유지합니다. 런처가 시작한 도구에만 PATH를 전달하며 시스템 PATH는 변경하지 않습니다. 활성 프로젝트 virtualenv/Conda는 동봉 Python보다 우선합니다.
-
-Python은 격리된 표준 라이브러리 유틸 용도이며 pip·ensurepip·Tk·과학 계산 패키지·완전한 개발 환경은 포함하지 않습니다. 현재 폴더/스크립트 옆 모듈은 자동 import하지 않습니다. 표준 입출력은 UTF-8이며 일반 파일은 `encoding="utf-8"`을 명시하세요. `-S`는 입출력 사용자 설정도 건너뜁니다. 범위·출처·변경 고지는 `manifests/utilities.json`과 `LICENSES/UTILITY-CHANGES.txt`에 있습니다.
-
-- PAC는 Python/Px 대신 WinHTTP·SSPI 네이티브 helper 한 개를 재사용합니다. worker 8개·대기 16개·버퍼 방향별 16 KiB·경로 캐시 32개/60초이며 직접 연결 모드에는 helper가 없습니다.
-- 네이티브 helper의 idle/warm private bytes와 working set 각각 32 MiB 기준을 Windows 빌드에서 확인합니다. 전체 앱이나 공유 Windows PAC 서비스의 상한이 아닙니다.
-- OMP·외부 터미널·다른 에이전트 CLI·로컬 음성 런타임/모델·Electron/브라우저 엔진을 배포하지 않습니다. Paseo 자체 기능에 필요한 PTY·플러그인 변환기는 유지합니다.
-- owned Node 자식의 V8 old-space 기본 상한은 프로세스당 256 MiB이며 RSS/전체 메모리/브라우저 상한이 아닙니다. 여러 에이전트를 동시에 열면 추가 메모리를 사용합니다.
-
-### 이전 배포에서 이동
-
-0.4.0 위에 덮어 풀지 말고 새 폴더에 풉니다. 기존 전용 데몬을 중지한 뒤 새 실행기로 시작하세요. 기존 OMP 프로필/실행기를 제공하지 않으며 OMP 세션을 native HTTP 세션으로 자동 변환하지 않습니다. 그 세션의 재개가 필요하면 [이전 0.4.0 배포본](https://github.com/emotionbug/kiro-cli-internal/releases/tag/v0.4.0)을 보관하세요. 기존 대화 파일이나 다른 프로그램의 OMP/Paseo는 삭제하지 않습니다.
-
-### 재현·검증
-
-정확한 버전·SHA/SRI·라이선스는 `build/inputs.json`, `payload/app/package-lock.json`, ZIP의 `LICENSES/`와 `bundle-manifest.json`에 있습니다. Node 22.23.4, Paseo 사용자 포크 `c3bac24ccc2df8dcc67d807c805db0efa0817dff`, HTTP 플러그인 0.4.6을 고정합니다. 포크 소스 아카이브 SHA-256은 `f2351ac409c8fe5228636b0d587b7a9d992ffe276400d1cfb3e40b1a7f4b79ff`입니다. 공개 npm 의존성 잠금과 포크 빌드 산출물의 해시·투영을 별도로 기록합니다. 대상 PC에는 npm/컴파일러 설치가 필요하지 않습니다.
-
-```sh
-# 인터넷 사용이 허용된 Ubuntu 빌드 PC
-node build/build-paseo-fork.mjs --output /tmp/paseo-fork --cache /tmp/paseo-cache
-```
-
-그 결과 폴더 전체를 승인된 Windows 빌드 PC의 `C:\Build\paseo-fork`로 옮긴 뒤 실행합니다.
+인터넷이 허용된 Windows x64 MSVC Developer Command 환경에서 실행합니다. Ubuntu 사전 빌드나 `--paseo-fork` 입력은 더 이상 사용하지 않습니다.
 
 ```powershell
-# Windows x64 MSVC Developer Command 환경
-node build/build-bundle.mjs --output C:\Build\kiro-paseo-http-0.5.0-windows-x64 --paseo-fork C:\Build\paseo-fork
-node test/windows-smoke.mjs C:\Build\kiro-paseo-http-0.5.0-windows-x64 C:\Build\qualification
+node build/build-bundle.mjs --output C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 --cache C:\Build\download-cache
+node test/windows-utilities.mjs C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 C:\Build\qualification
+node test/windows-smoke.mjs C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 C:\Build\qualification
 ```
 
-[Windows 워크플로](.github/workflows/portable-windows.yml)는 빌드와 실제 ZIP 검증을 분리합니다. 같은 실행에서 검증 작업만 실패하면 빌드를 반복하지 않고 해당 작업을 다시 실행할 수 있습니다. 제어된 upstream 검사는 실제 Kiro 클라우드 응답 증거가 아니며 알려진 계정 사용량 한도 때문에 실서비스 추론을 다시 요청하지 않습니다.
+[Windows 워크플로](.github/workflows/portable-windows.yml)는 조립과 해당 ZIP의 검증을 분리합니다. 네이티브 `paseo` CLI에서 실제 OMP를 실행하여 모델 고정·파일 내용·HTTP 오류/스트림 단절 복구·도구 비반복·Kiro 검색·정밀 사용량·데몬 재시작 후 같은 대화 재개·전용 종료·패키지 무변경을 검사합니다. 별도 유틸리티 검사는 재배치된 한글 경로에서 Python SQLite → rg → jq 결과와 전체 Git Bash를 확인합니다.
 
-[릴리스 승격](.github/workflows/publish-qualified-release.yml)은 성공한 main 검증 실행의 기존 ZIP을 재사용합니다. ZIP SHA-256, 모든 내부 파일의 크기·SHA-256, manifest 일치와 직접 HTTP 전용 구성을 확인하고 검증 소스 커밋에 태그를 묶습니다. 업로드된 Release 자산의 서버 digest까지 맞춘 뒤 공개하며 다시 빌드하거나 이전 Release를 덮어쓰지 않습니다.
+[릴리스 승격](.github/workflows/publish-qualified-release.yml)은 성공한 main 검증 실행의 기존 ZIP만 사용합니다. 해시·모든 내부 파일·고정 입력·native OMP qualification 결과를 확인하고 검증 소스 커밋에 태그를 묶습니다. 이 로컬 변경만으로 CI 실행이나 공개 Release를 완료했다고 간주하지 않습니다.
 
-Release의 `report.json`, `reconnect.json`, `utilities.json`, `bundle-manifest.json`, `web-ui.png`, `release-verification.json`이 해당 배포의 검증 범위와 실측입니다. 프로세스별 working set 합은 공유 페이지를 중복 셀 수 있으며 고유 물리 메모리나 상한이 아닙니다.
+제어된 upstream 결과는 실제 Kiro 계정·회사망 추론 성공의 증거가 아닙니다. 네이티브 CLI 검사만으로 데스크톱 UI도 검증했다고 표시하지 않습니다. 실제 회사 PAC·SSPI 정책·AppLocker/WDAC·계정 권한은 현장 확인이 필요합니다. **Server 2019/build 17763 호환성은 미확인**이며 `server2019Verified:false`를 유지합니다.
 
-[Windows Server 2022 최종 검증](https://github.com/emotionbug/kiro-cli-internal/actions/runs/40813785340)을 통과했습니다. 실제 native Full access 파일 쓰기, Kiro 검색·인용·사용량, 모델 고정, 30초 복구 두 경로, Windows 경로 별칭, 개인 대화 기록, 수락/확인 유실 요청의 재접속·중복 방지, 실제 브라우저 큐 함수, 전용 종료와 전체 파일 무결성을 확인했습니다. [컴포넌트 Node 22/24·실제 HTTP continuation 회귀 검사](https://github.com/emotionbug/omp-kiro/actions/runs/40813782567)도 통과했습니다.
-
-완료 에이전트 1개·2초 idle에서 브라우저를 제외한 스택의 working set/private bytes 합은 약 **517/516 MiB**였습니다. 이전 0.4.0의 해당 단계는 약 827/940 MiB였습니다. 별도 CI 관측 비교이며 공유 페이지 중복·동시 에이전트·브라우저 메모리·실제 작업에 따라 달라집니다. 메모리 상한이나 일반 성능 보장은 아닙니다.
-
-**Server 2019/build 17763은 목표 환경이지 실행 검증 완료 환경이 아닙니다.** `server2019Verified:false`를 유지합니다. 실제 회사 네트워크와 인증 후 브라우저 상호작용은 별도 검증이 필요합니다.
-
-관련 출처: [Node 기업망 TLS](https://nodejs.org/learn/http/enterprise-network-configuration), [WinHTTP PAC](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpgetproxyforurl), [SSPI](https://learn.microsoft.com/en-us/windows/win32/secauthn/sspi), [HTTP 플러그인 소스](https://github.com/emotionbug/omp-kiro).
+**2026-11-13 Windows build 26200 로컬 검증:** 최종 ZIP을 새 한글 경로에 풀어 회귀 테스트 **37개 모두 통과(스킵 0)**, 유틸리티 파이프라인, 실제 OMP 파일 쓰기·검색·30초 HTTP 복구·같은 대화 재개를 확인했습니다. Kiro 외 자동 프록시 요청은 **0건**이고 패키지 파일은 실행 전후 동일했습니다. 기존 설치의 알림 등록을 보존하는 사용자 선택에 따라 **GUI 실행은 보류**했습니다. [0.6.0 변경사항과 검증 범위](releases/0.6.0/RELEASE.md)를 참조하세요. 이 수치는 로컬 실행 기록이며 GitHub 배포의 소스 SHA·Windows 검증 실행·ZIP 해시는 해당 Release에 첨부한 근거를 기준으로 확인하세요.
 
 ---
 

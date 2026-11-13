@@ -21,17 +21,15 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeZip } from "./archive.mjs";
 import { assembleUtilities } from "./assemble-utilities.mjs";
-import { materializePaseoFork } from "./paseo-fork.mjs";
-import { applyPaseoDirectOnly, pruneProductionClosure, assertDirectOnlyPayload } from "./paseo-direct-only.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inputs = JSON.parse(await readFile(path.join(repo, "build/inputs.json"), "utf8"));
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   const flag = process.argv[i];
-  if (!["--output", "--cache", "--paseo-fork"].includes(flag) || !process.argv[i + 1] || options.has(flag)) {
+  if (!["--output", "--cache"].includes(flag) || !process.argv[i + 1] || options.has(flag)) {
     throw new Error(
-      "Usage: node build/build-bundle.mjs --output <absolute absent root> --paseo-fork <absolute source-build artifact directory> [--cache <absolute directory>]",
+      "Usage: node build/build-bundle.mjs --output <absolute absent root> [--cache <absolute directory>]",
     );
   }
   if (!path.isAbsolute(process.argv[i + 1])) throw new Error(`${flag} must be absolute`);
@@ -39,11 +37,9 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 const output = options.get("--output");
 if (!output) throw new Error("--output is required");
-const forkDirectory = options.get("--paseo-fork");
-if (!forkDirectory) throw new Error("--paseo-fork is required; public npm products are not the user's fork");
 if (process.platform !== "win32" || process.arch !== "x64") {
   throw new Error(
-    "A complete bundle must be built on Windows x64: published Windows native addons must load and node-pty must spawn under bundled Node 22.23.4. Linux preparation is not native validation.",
+    `A complete bundle must be built on Windows x64: native Passession, OMP, utilities and the WinHTTP/SSPI helper must execute under bundled Node ${inputs.assets.node.version}.`,
   );
 }
 const cache = options.get("--cache") ?? path.join(repo, ".work/download-cache");
@@ -471,15 +467,7 @@ async function extract(archive, destination, strip = 0, include) {
   )
     .split(/\r?\n/)
     .filter(Boolean);
-  for (const member of members) {
-    const normalized = member.replaceAll("\\", "/");
-    if (
-      normalized.startsWith("/") ||
-      /^[A-Za-z]:/.test(normalized) ||
-      normalized.split("/").includes("..")
-    )
-      throw new Error(`Unsafe archive member: ${member}`);
-  }
+  for (const member of members) assertSafeMember(member);
   let selection = [];
   if (include) {
     const selected = members.filter((member) => !member.endsWith("/") && include(member));
@@ -492,7 +480,7 @@ async function extract(archive, destination, strip = 0, include) {
   await run(
     systemTar,
     [
-      "-xf",
+      "-xmf",
       archive,
       "-C",
       destination,
@@ -502,6 +490,102 @@ async function extract(archive, destination, strip = 0, include) {
     { phase: `${path.basename(destination)}-extract` },
   );
   await tree(destination); // Reject every link, including links that point inside the tree.
+}
+function assertSafeMember(member) {
+  const normalized = member.replaceAll("\\", "/");
+  if (
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:/.test(normalized) ||
+    normalized.split("/").includes("..")
+  )
+    throw new Error(`Unsafe archive member: ${member}`);
+}
+// Pinned 7-Zip reads archive formats Windows tar cannot (7z SFX, NSIS) without executing them.
+async function unpack(tool, archive, destination) {
+  await mkdir(destination, { recursive: true });
+  const members = (
+    await run(tool, ["l", "-slt", "-ba", "-sccUTF-8", archive], {
+      capture: true,
+      phase: `${path.basename(destination)}-list`,
+    })
+  )
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("Path = "))
+    .map((line) => line.slice("Path = ".length));
+  if (!members.length) throw new Error(`No members listed in ${path.basename(archive)}`);
+  for (const member of members) assertSafeMember(member);
+  await run(tool, ["x", "-y", "-bd", "-sccUTF-8", `-o${destination}`, archive], {
+    capture: true,
+    phase: `${path.basename(destination)}-extract`,
+  });
+  return tree(destination); // Reject every link, including links that point inside the tree.
+}
+const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// Both Passession payloads carry upstream identity markers; they must match the pinned release.
+async function passessionIdentity(directory, installationKind) {
+  const pin = inputs.assets.passessionDaemon;
+  const relative = path.relative(output, directory).replaceAll("\\", "/");
+  const runtime = JSON.parse(await readFile(path.join(directory, "paseo-runtime.json"), "utf8"));
+  const provenance = JSON.parse(
+    await readFile(path.join(directory, "bundle-provenance.json"), "utf8"),
+  );
+  for (const marker of [runtime, provenance]) {
+    if (
+      marker.version !== pin.version ||
+      marker.sourceSha !== pin.commit ||
+      marker.installationKind !== installationKind ||
+      marker.platform !== "windows" ||
+      marker.arch !== "x64" ||
+      marker.runtime !== "rust" ||
+      marker.release !== true
+    )
+      throw new Error(`Passession identity marker differs from the pinned release: ${relative}`);
+  }
+  if (provenance.repository !== "emotionbug/Passession" || provenance.sourceDirty !== false)
+    throw new Error(`Passession provenance is not the official clean release: ${relative}`);
+  const sha256 = await digest(path.join(directory, "paseo.exe"));
+  if (sha256 !== provenance.executableSha256 || sha256 !== pin.executableSha256)
+    throw new Error(`Passession executable digest differs from provenance/pin: ${relative}`);
+  return {
+    version: pin.version,
+    commit: pin.commit,
+    root: relative,
+    executable: `${relative}/paseo.exe`,
+    sha256,
+    installationKind,
+  };
+}
+// Static ESM import closure from package entries. Relative modules must exist inside the package;
+// bare specifiers must be host-provided (Node/Bun builtins, OMP's @oh-my-pi/pi-ai). Fail closed.
+async function moduleClosure(root, entries) {
+  const files = new Set();
+  const hostModules = new Set();
+  const queue = [...entries];
+  while (queue.length) {
+    const name = queue.shift();
+    if (files.has(name)) continue;
+    const text = await readFile(path.join(root, name), "utf8").catch((error) => {
+      if (error.code === "ENOENT") throw new Error(`Plugin module missing: ${name}`);
+      throw error;
+    });
+    files.add(name);
+    for (const match of text.matchAll(
+      /\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)|^\s*import\s*["']([^"']+)["']/gm,
+    )) {
+      const specifier = match[1] ?? match[2] ?? match[3];
+      if (specifier.startsWith(".")) {
+        const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier));
+        if (resolved.startsWith("../"))
+          throw new Error(`Plugin module escapes its package: ${name} -> ${specifier}`);
+        queue.push(resolved);
+      } else if (/^(?:node|bun):/.test(specifier) || specifier === "@oh-my-pi/pi-ai") {
+        hostModules.add(specifier);
+      } else {
+        throw new Error(`Plugin OMP closure imports an unbundled package: ${name} -> ${specifier}`);
+      }
+    }
+  }
+  return { files, hostModules };
 }
 async function assertFile(relative) {
   const stat = await lstat(path.join(output, relative)).catch(() => {
@@ -543,7 +627,6 @@ try {
   await copyTree(payload, output);
   const acquired = {};
   for (const name of Object.keys(inputs.assets)) {
-    if (name === "paseoFork") continue; // The source job acquired and compiled this immutable archive.
     checkpoint(`acquire-${name}`);
     acquired[name] = await acquire(name);
   }
@@ -638,6 +721,112 @@ try {
     scope:
       "Direct imports only; source API review and actual Server 2019 execution remain distinct requirements",
   };
+  checkpoint("seven-zip");
+  // Build-host tool only: 7zr.exe reads the official 7-Zip 7z archive, whose full 7z.exe/7z.dll
+  // then read the NSIS desktop installer. No installer is executed and 7-Zip is not shipped.
+  const sevenZipRoot = path.join(work, "7-zip");
+  const sevenZipFiles = (await unpack(acquired.sevenZipBootstrap, acquired.sevenZip, sevenZipRoot))
+    .map((file) => file.path);
+  for (const required of ["7z.exe", "7z.dll"])
+    if (!sevenZipFiles.includes(required)) throw new Error(`Pinned 7-Zip lacks ${required}`);
+  const sevenZip = path.join(sevenZipRoot, "7z.exe");
+  checkpoint("passession-daemon");
+  const passessionRoot = path.join(output, "runtime/passession");
+  await extract(acquired.passessionDaemon, passessionRoot);
+  const passessionDaemon = await passessionIdentity(passessionRoot, "standalone-archive");
+  checkpoint("passession-app");
+  const installer = path.join(work, "passession-app-installer");
+  const installerFiles = (await unpack(sevenZip, acquired.passessionApp, installer))
+    .map((file) => file.path)
+    .filter((name) => !name.startsWith("$PLUGINSDIR/")); // NSIS installer UI plugins
+  const inventoryName = ".paseo-sessions-owned-files";
+  // The installer's own inventory is the authority for its payload; any drift fails the build.
+  const owned = (await readFile(path.join(installer, inventoryName), "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((name) => name.replaceAll("\\", "/"))
+    .sort(ordinal);
+  if (JSON.stringify(owned) !== JSON.stringify([...installerFiles].sort(ordinal)))
+    throw new Error("Desktop installer payload differs from its owned-file inventory");
+  const installerOnly = ["Uninstall.exe", inventoryName];
+  const passessionAppRoot = path.join(output, "runtime/passession-app");
+  await copyTree(
+    installer,
+    passessionAppRoot,
+    (name) => !installerOnly.includes(name) && owned.includes(name),
+  );
+  const passessionAppDaemon = await passessionIdentity(
+    path.join(passessionAppRoot, "runtime"),
+    "desktop-bundled",
+  );
+  const desktopDescriptor = JSON.parse(
+    await readFile(path.join(passessionAppRoot, "runtime/desktop-runtime.json"), "utf8"),
+  );
+  if (desktopDescriptor.executable !== "paseo.exe")
+    throw new Error("Desktop runtime descriptor does not name its bundled daemon");
+  checkpoint("omp");
+  const ompExecutable = path.join(output, "runtime/omp/omp.exe");
+  await mkdir(path.dirname(ompExecutable), { recursive: true });
+  await copyFile(acquired.omp, ompExecutable);
+  checkpoint("omp-network-policy");
+  for (const name of ["ompCatalog", "ompProviderRules"])
+    if (inputs.assets[name].version !== inputs.assets.omp.version)
+      throw new Error(`${name} must match the pinned OMP executable version`);
+  const ompCatalog = JSON.parse(await readFile(acquired.ompCatalog, "utf8"));
+  const ompRules = JSON.parse(await readFile(acquired.ompProviderRules, "utf8"));
+  if (ompCatalog.version !== 1 || !Array.isArray(ompCatalog.providers) ||
+      !ompRules.providers || typeof ompRules.providers !== "object" || Array.isArray(ompRules.providers))
+    throw new Error("Unsupported OMP provider inventory format");
+  const disabledProviders = [...new Set([
+    ...ompCatalog.providers.map((row) => row[0]),
+    ...Object.keys(ompRules.providers),
+  ])].sort();
+  if (!disabledProviders.length ||
+      disabledProviders.some((id) => typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id) || id === "kiro-http"))
+    throw new Error("Invalid built-in OMP provider inventory");
+  await json(path.join(output, "app/omp-network-policy.json"), {
+    disabledProviders,
+    startup: { checkUpdate: false, setupWizard: false },
+    update: { auto: false },
+    marketplace: { autoUpdate: "off" },
+  });
+  checkpoint("native-runtime-imports");
+  // Upstream executables are shipped unmodified; their direct DLL imports are recorded, not shimmed.
+  const nativeRuntimeImports = [];
+  for (const relative of [
+    "runtime/passession/paseo.exe",
+    "runtime/passession-app/paseo_sessions.exe",
+    "runtime/passession-app/runtime/paseo.exe",
+    "runtime/omp/omp.exe",
+  ]) {
+    const executable = path.join(output, relative);
+    const dependents = await run("dumpbin.exe", ["/nologo", "/dependents", executable], {
+      capture: true,
+    });
+    const importedDlls = [
+      ...new Set(
+        [...dependents.matchAll(/^\s+([A-Za-z0-9_.-]+\.dll)\s*$/gim)].map((match) =>
+          match[1].toLowerCase(),
+        ),
+      ),
+    ].sort();
+    if (!importedDlls.length) throw new Error(`No direct imports read from ${relative}`);
+    const besideExecutable = new Set(
+      (await readdir(path.dirname(executable))).map((name) => name.toLowerCase()),
+    );
+    nativeRuntimeImports.push({
+      path: relative,
+      sha256: await digest(executable),
+      importedDlls,
+      bundledBesideExecutable: importedDlls.filter((name) => besideExecutable.has(name)),
+    });
+  }
+  const desktopImports = nativeRuntimeImports.find(
+    (item) => item.path === "runtime/passession-app/paseo_sessions.exe",
+  ).importedDlls;
+  const desktopRequiresMediaFoundation = desktopImports.some((name) =>
+    /^(?:mfplat|mf|mfreadwrite)\.dll$/.test(name),
+  );
   checkpoint("plugin");
   const source = path.join(work, "plugin");
   await extract(acquired.plugin, source, 1);
@@ -645,33 +834,38 @@ try {
   const published = JSON.parse(await readFile(path.join(source, "package.json"), "utf8"));
   if (published.version !== inputs.assets.plugin.version)
     throw new Error("Plugin source version does not match pin");
-  await copyTree(source, plugin, (name) =>
-    /^(server\/|docs\/|index\.js$|index\.server\.ts$|icon\.svg$|LICENSE$|README\.md$|[^/]+\.mjs$)/.test(
-      name,
-    ),
-  );
+  if (JSON.stringify(published.omp?.extensions) !== JSON.stringify(["./index.js"]))
+    throw new Error("Plugin OMP extension entry changed");
+  // Passession 0.13.15 loads only native Rust plugins, so omp-kiro's JavaScript Paseo provider
+  // (index.server.ts, server/provider|tools|mcp|usage-source.mjs) cannot load and is not shipped.
+  // Ship the exact static module closure of the OMP extension and the auth CLI.
+  const pluginClosure = await moduleClosure(source, ["index.js", "auth-cli.mjs"]);
+  const pluginShipped = (name) =>
+    pluginClosure.files.has(name) || /^(?:docs\/|LICENSE$|README\.md$|icon\.svg$)/.test(name);
+  await copyTree(source, plugin, pluginShipped);
   const {
     scripts,
+    dependencies: pluginDependencies,
     devDependencies,
-    peerDependencies,
-    peerDependenciesMeta,
+    files: publishedFiles,
     ...productionManifest
   } = published;
   await json(path.join(plugin, "package.json"), productionManifest);
-  const pluginManifest = JSON.parse(await readFile(path.join(source, "paseo-plugin.json"), "utf8"));
-  delete pluginManifest.build;
-  await json(path.join(plugin, "paseo-plugin.json"), pluginManifest);
   await json(path.join(plugin, "BUNDLE-PROJECTION.json"), {
     upstream: inputs.assets.plugin,
+    entries: ["index.js", "auth-cli.mjs"],
+    moduleClosure: [...pluginClosure.files].sort(ordinal),
+    hostModules: [...pluginClosure.hostModules].sort(ordinal),
+    omittedFiles: (await tree(source))
+      .map((file) => file.path)
+      .filter((name) => !pluginShipped(name)),
     modifications: [
-      "package.json: removed development/scripts/optional host-peer installation metadata; production dependencies resolve from app/node_modules",
-      "paseo-plugin.json: removed npm ci build step because production dependencies are already assembled",
+      "Only the static module closure of the OMP extension (index.js) and auth CLI (auth-cli.mjs), with docs, README, LICENSE and icon, is shipped; the JavaScript Paseo provider files are omitted because Passession loads only native plugins",
+      "package.json: removed scripts, devDependencies, the publish file list and npm dependencies (@modelcontextprotocol/sdk, ajv), which only the omitted Paseo provider imports; @oh-my-pi/pi-ai remains a host-supplied optional peer",
     ],
     originalPackageManifest: published,
-    originalPluginManifest: JSON.parse(
-      await readFile(path.join(source, "paseo-plugin.json"), "utf8"),
-    ),
   });
+  checkpoint("npm-ci");
   const app = path.join(output, "app");
   const lock = JSON.parse(await readFile(path.join(app, "package-lock.json"), "utf8"));
   for (const [name, item] of Object.entries(lock.packages)) {
@@ -701,7 +895,6 @@ try {
     NPM_CONFIG_USERCONFIG: path.join(work, "npmrc"),
     NPM_CONFIG_GLOBALCONFIG: path.join(work, "global-npmrc"),
   });
-  checkpoint("npm-ci");
   await run(
     node,
     [
@@ -718,45 +911,35 @@ try {
     ],
     { cwd: app, env, phase: "npm-cli.js", timeoutMs: 180000 },
   );
-  checkpoint("paseo-fork-materialization");
-  const paseoFork = await materializePaseoFork({
-    directory: forkDirectory, app, output, repo, work, inputs, lock, extract, tree, digest,
-  });
-  checkpoint("paseo-direct-only-projection");
-  const directProjection = await applyPaseoDirectOnly(
-    path.join(app, "node_modules/@getpaseo/server"),
-    { fork: paseoFork.manifest },
-  );
-  const sourceProjections = [...paseoFork.manifest.sourceProjections, directProjection];
-  checkpoint("production-dependency-closure");
-  const prunedComponents = await pruneProductionClosure(app, lock);
-  checkpoint("node-pty-prebuilds");
-  const ptyPrebuilds = path.join(app, "node_modules/node-pty/prebuilds");
-  for (const entry of await readdir(ptyPrebuilds)) {
-    if (entry !== "win32-x64")
-      await rm(path.join(ptyPrebuilds, entry), { recursive: true, force: true });
-  }
-  // Exact npm tarballs contain retained N-API node-pty prebuilds and esbuild.exe.
-  // No install hooks, node-gyp, downloads or compiler toolchain are needed at runtime.
   checkpoint("required-payload");
   for (const relative of [
-    "start.cmd",
-    "auth.cmd",
-    "stop.cmd",
-    "doctor.cmd",
+    "paseo.cmd",
+    "omp.cmd",
+    "app.cmd",
     "app/lib/run.mjs",
+    "app/omp-network-policy.json",
     "runtime/node/node.exe",
     "runtime/git/bin/bash.exe",
     "runtime/git/cmd/git.exe",
     "runtime/proxy/kiro-proxy.exe",
-    "app/node_modules/node-pty/prebuilds/win32-x64/conpty.node",
-    "app/node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node",
-    "app/node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll",
-    "app/node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe",
-    "app/node_modules/@esbuild/win32-x64/esbuild.exe",
-    "app/node_modules/@types/node/index.d.ts",
-    "app/node_modules/@getpaseo/plugin/dist/server/index.d.ts",
-    "app/node_modules/@getpaseo/server/dist/server/web-ui/index.html",
+    "runtime/passession/paseo.exe",
+    "runtime/passession/LICENSE",
+    "runtime/passession/THIRD-PARTY-NOTICES.txt",
+    "runtime/passession-app/paseo_sessions.exe",
+    "runtime/passession-app/LICENSE",
+    "runtime/passession-app/THIRD-PARTY-NOTICES.txt",
+    "runtime/passession-app/runtime/paseo.exe",
+    "runtime/passession-app/runtime/desktop-runtime.json",
+    "runtime/omp/omp.exe",
+    "app/plugin/omp-kiro/index.js",
+    "app/plugin/omp-kiro/auth-cli.mjs",
+    "app/plugin/omp-kiro/server/auth.mjs",
+    "app/plugin/omp-kiro/server/model-catalog.mjs",
+    "app/plugin/omp-kiro/server/http.mjs",
+    "app/plugin/omp-kiro/server/usage.mjs",
+    "app/node_modules/@clack/prompts/package.json",
+    "app/node_modules/proxy-agent/package.json",
+    "app/node_modules/undici/package.json",
   ])
     await assertFile(relative);
   const probeEnv = {
@@ -802,19 +985,19 @@ try {
   // Only safe structured validation evidence is shipped; temporary compiler results stay in work.
   const licenses = path.join(output, "LICENSES");
   await mkdir(path.join(licenses, "sources"), { recursive: true });
-  for (const [name, destination] of Object.entries({
-    paseoLicense: "PASEO-LICENSE.txt",
-    gitSource: "sources/mingw-w64-git-2.56.0.3-1.src.tar.gz",
-  }))
-    await copyFile(acquired[name], path.join(licenses, destination));
+  const gitSourceName = path.posix.basename(new URL(inputs.assets.gitSource.url).pathname);
+  await copyFile(acquired.gitSource, path.join(licenses, "sources", gitSourceName));
+  await copyFile(acquired.ompLicense, path.join(licenses, "OMP-LICENSE.txt"));
+  await copyFile(path.join(passessionRoot, "LICENSE"), path.join(licenses, "PASSESSION-LICENSE.txt"));
   await copyFile(
     path.join(output, "runtime/node/LICENSE"),
     path.join(licenses, "NODE-LICENSE.txt"),
   );
   await copyFile(path.join(plugin, "LICENSE"), path.join(licenses, "KIRO-HTTP-PLUGIN-LICENSE.txt"));
+  const daemonPin = inputs.assets.passessionDaemon;
   await writeFile(
     path.join(licenses, "SOURCE-AVAILABILITY.txt"),
-    `Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every retained installed package; NPM-PACKAGES.json distinguishes exact public integrity pins from compiled user-fork overlays and records their acquisition base. Paseo server, CLI, runtime workspaces and full browser UI are compiled together from ${inputs.assets.paseoFork.repository} at ${inputs.assets.paseoFork.commit}; immutable source archive ${inputs.assets.paseoFork.url}, SHA-256 ${inputs.assets.paseoFork.sha256}. Apache-2.0 LICENSE is preserved; the monorepo source archive is a CI verification input, not part of this runtime ZIP. PASEO-PROVENANCE.json records compiler, lock and hash-guarded native-only/browser source projections; their complete transformation sources and pinned inputs are included under LICENSES/sources. PRUNED-COMPONENTS.json records actual staged package bytes removed after the production dependency closure. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license and projection metadata.\n`,
+    `Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources/${gitSourceName}. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nPassession ${daemonPin.version} (Apache-2.0) native daemon and desktop client are the unmodified official release binaries of ${daemonPin.repository} at ${daemonPin.commit}; source is available at ${daemonPin.repository}/tree/${daemonPin.commit}. runtime/passession is the complete daemon release ZIP. runtime/passession-app is the complete payload of the official NSIS installer as listed by its own owned-file inventory, unpacked with 7-Zip without running the installer; the installer-generated Uninstall.exe and the inventory file are omitted. Their LICENSE, THIRD-PARTY-NOTICES, Rust third-party notices and font licenses remain in place.\nOMP ${inputs.assets.omp.version} is the unmodified official standalone executable from ${inputs.assets.omp.repository} (MIT, LICENSES/OMP-LICENSE.txt); it embeds its own JavaScript runtime.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every installed package; NPM-PACKAGES.json records exact public registry integrity pins. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license; app/plugin/omp-kiro/BUNDLE-PROJECTION.json records the shipped module closure and manifest changes.\n`,
   );
   await copyFile(nativeSource, path.join(licenses, "sources/kiro-proxy.cpp"));
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
@@ -825,9 +1008,15 @@ try {
     linkerFlags: ["/SUBSYSTEM:CONSOLE", "/STACK:262144"],
     libraries: ["ws2_32.lib", "winhttp.lib", "secur32.lib", "bcrypt.lib"],
     runtime: "static /MT; no VC redistributable installer",
-    windowsApiTarget: "Windows 10 / Server 2019; actual Server 2019 execution unverified",
+    windowsApiTarget:
+      "Windows 10 API level (_WIN32_WINNT 0x0A00); actual Server 2019 execution unverified",
   });
   await json(path.join(licenses, "NATIVE-PROXY-IMPORTS.json"), nativeImports);
+  await json(path.join(licenses, "NATIVE-RUNTIME-IMPORTS.json"), {
+    scope:
+      "Direct DLL imports of unmodified upstream executables, read with dumpbin /dependents. Delay-loaded/dynamic resolution and minimum OS are not established here.",
+    files: nativeRuntimeImports,
+  });
   await json(path.join(output, "native-proxy-validation.json"), proxyValidation);
   checkpoint("npm-inventory");
   const packages = [];
@@ -836,41 +1025,21 @@ try {
     const installed = JSON.parse(await readFile(path.join(app, name, "package.json"), "utf8"));
     if (installed.version !== item.version)
       throw new Error(`Installed package differs from lock: ${name}`);
-    const fork = item.fork;
     packages.push({
       path: `app/${name}`,
       name: installed.name,
       version: item.version,
-      sourceType: fork ? "compiled-user-fork" : "public-npm",
-      ...(fork ? { fork, acquisitionBase: item.acquisitionBase } : { url: item.resolved, integrity: item.integrity }),
-      license:
-        installed.license ??
-        item.license ??
-        (installed.name?.startsWith("@getpaseo/")
-          ? "Apache-2.0 (LICENSES/PASEO-LICENSE.txt)"
-          : "See package notices"),
+      url: item.resolved,
+      integrity: item.integrity,
+      license: installed.license ?? item.license ?? "See package notices",
     });
   }
+  if (packages.some((item) => item.name?.startsWith("@getpaseo/")))
+    throw new Error("Obsolete Paseo JavaScript packages must not be shipped");
   await json(path.join(licenses, "NPM-PACKAGES.json"), packages);
   await json(path.join(licenses, "DOWNLOAD-INPUTS.json"), inputs);
-  await json(path.join(licenses, "PASEO-PROVENANCE.json"), {
-    version: inputs.assets.paseoFork.version,
-    source: paseoFork.manifest.source,
-    compilation: paseoFork.manifest.compilation,
-    workspaceOverlay: paseoFork.overlay,
-    dependencyGraph: paseoFork.dependencyGraph,
-    publishedWebUi: false,
-    forkWebUi: true,
-    webUi: paseoFork.manifest.webUi,
-    builtinPluginsPreserved: false,
-    nativePluginOnly: true,
-    builtinPlugins: [],
-    sourceProjections,
-  });
-  await json(path.join(licenses, "PRUNED-COMPONENTS.json"), prunedComponents);
   checkpoint("payload-hashes");
   const files = await tree(output);
-  const directOnlyPolicy = assertDirectOnlyPayload(files);
   for (const file of files) file.sha256 = await digest(path.join(output, file.path));
   const pythonInterpreterFiles = files
     .filter((file) =>
@@ -889,6 +1058,7 @@ try {
           ? "Preserved unmodified with PortableGit rather than silently changing Git behavior. Packaged proxy/auth do not require Python; invocation by other Git functionality is not asserted."
           : "Reported, not blindly deleted: this inventory is not a blanket interpreter ban.",
     }));
+  const pluginPin = inputs.assets.plugin;
   const manifest = {
     schemaVersion: 1,
     packageVersion: JSON.parse(await readFile(path.join(app, "package.json"), "utf8")).version,
@@ -905,20 +1075,43 @@ try {
     },
     inputs: inputs.assets,
     npmLockSha256: await digest(path.join(app, "package-lock.json")),
-    paseoFork: {
-      source: paseoFork.manifest.source,
-      version: paseoFork.manifest.version,
-      webUi: paseoFork.manifest.webUi,
-      packages: paseoFork.manifest.packages,
-      compilation: paseoFork.manifest.compilation,
-      dependencyGraph: paseoFork.dependencyGraph,
-      workspaceOverlay: paseoFork.overlay,
+    native: {
+      passessionDaemon,
+      passessionApp: {
+        version: inputs.assets.passessionApp.version,
+        commit: inputs.assets.passessionApp.commit,
+        root: "runtime/passession-app",
+        executable: "runtime/passession-app/paseo_sessions.exe",
+        sha256: await digest(path.join(passessionAppRoot, "paseo_sessions.exe")),
+        bundledDaemon: passessionAppDaemon.executable,
+        bundledDaemonSha256: passessionAppDaemon.sha256,
+        descriptor: "runtime/passession-app/runtime/desktop-runtime.json",
+        installerSha256: inputs.assets.passessionApp.sha256,
+        unpackedBy: `7-Zip ${inputs.assets.sevenZip.version} (build host only; installer not executed)`,
+        excludedInstallerMembers: [...installerOnly, "$PLUGINSDIR/*"],
+      },
+      omp: {
+        version: inputs.assets.omp.version,
+        executable: "runtime/omp/omp.exe",
+        sha256: inputs.assets.omp.sha256,
+        networkPolicy: "app/omp-network-policy.json",
+        disabledBuiltInProviders: disabledProviders.length,
+        policySources: ["ompCatalog", "ompProviderRules"],
+      },
+      plugin: {
+        version: pluginPin.version,
+        commit: pluginPin.commit,
+        root: "app/plugin/omp-kiro",
+        extension: "app/plugin/omp-kiro/index.js",
+        projection: "app/plugin/omp-kiro/BUNDLE-PROJECTION.json",
+      },
+      node: { version: inputs.assets.node.version, executable: "runtime/node/node.exe" },
+      imports: "LICENSES/NATIVE-RUNTIME-IMPORTS.json",
     },
-    sourceProjections,
     nativeValidation: {
       ...validation,
       windowsRelease: os.release(),
-      scope: "Build host only. This is not Server 2019/build 17763 execution evidence.",
+      scope: `${validation.scope} Not Windows Server 2019/build 17763 execution evidence.`,
     },
     utilities,
     proxy: {
@@ -940,19 +1133,32 @@ try {
       validation: proxyValidation,
     },
     compatibility: {
-      intended: "Windows x64 / Server 2019 build 17763",
+      intended:
+        "Windows 10/11 x64 desktop sessions; only the build host is exercised by the producer",
+      server2019Supported: false,
       server2019Verified: false,
       minimumOsFromRuntimeExecution: null,
+      windowsServer:
+        "Not claimed. Current Node.js, CPython, OMP and Passession releases are not qualified on Windows Server here.",
+      desktopRequiresMediaFoundation,
+      desktopImports,
       noFakeNativeDlls: true,
-      browser:
-        "User-supplied approved current Microsoft Edge or Chrome; no browser or Electron bundled",
-      speech: "Not included: optional speech service and provider runtimes omitted at source; WebSocket speech dependency is null.",
+      browser: "Not required: native Passession desktop client; no browser or Electron bundled",
     },
     componentInventory: {
       pythonInterpreterFiles,
-      retainedRuntime: ["Paseo core/CLI", "Kiro HTTP native plugin", "Node.js", "node-pty/ConPTY", "esbuild plugin compiler", "CPython standard library", "ripgrep", "jq", "Complete PortableGit", "WinHTTP/SSPI helper"],
-      directOnlyPolicy,
-      prunedComponents,
+      retainedRuntime: [
+        "Passession native daemon/CLI",
+        "Passession native desktop client",
+        "OMP standalone executable",
+        "Kiro HTTP OMP extension",
+        "Node.js (wrapper/auth)",
+        "CPython standard library",
+        "ripgrep",
+        "jq",
+        "Complete PortableGit",
+        "WinHTTP/SSPI helper",
+      ],
       scope:
         "Conventional Python/PyPy EXE/DLL names across every staged file; not proof against an embedded or renamed interpreter. Complete paths and hashes remain in files. No package-wide Python-free claim is made.",
     },
@@ -961,7 +1167,7 @@ try {
       sourcePayloadGuard: true,
       linksAllowed: false,
       sourceProjection:
-        "Only pinned public archives with recorded build-time Paseo source projection, plus repository payload; no host installations or user configuration copied",
+        "Only pinned public release archives and registry packages plus repository payload; no host installations, installer side effects or user configuration copied",
     },
     files,
     manifestSelfHash:
@@ -985,6 +1191,12 @@ try {
       files: archiveFiles.length,
       target: inputs.target,
       server2019Verified: false,
+      native: {
+        passession: passessionDaemon.version,
+        omp: inputs.assets.omp.version,
+        plugin: pluginPin.version,
+        node: inputs.assets.node.version,
+      },
       pythonInterpreterFiles: pythonInterpreterFiles.map((file) => file.path),
     }),
   );

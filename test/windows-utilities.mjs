@@ -349,7 +349,8 @@ async function qualify() {
     env = runtimeEnv(
       {
         root: home,
-        home: path.join(home, "paseo"),
+        home: path.join(home, "passession"),
+        ompDir: path.join(home, "omp"),
         authFile: path.join(home, "unused-auth.json"),
         config: { nodeHeapMb: 128 },
       },

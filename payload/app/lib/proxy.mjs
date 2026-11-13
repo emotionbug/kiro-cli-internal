@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import http from "node:http";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { getCACertificates } from "node:tls";
 
 const libDir = fileURLToPath(new URL(".", import.meta.url));
 const proxyKeys = /^(?:https?|all|no)_proxy$|^PX_/i;
@@ -109,9 +110,12 @@ export async function startProxy({ bundleRoot, dataDir, config = {}, env = proce
       throw new Error("network.caFile must contain valid PEM certificates.");
     }
   }
-  // Node loads Windows roots through --use-system-ca. Only additional public
-  // certificates need an immutable export; never copy raw payload/comments.
-  const pem = extra;
+  // Node loads Windows roots through --use-system-ca. Compiled Bun (OMP) does
+  // not, and the Kiro extension replaces Bun's defaults with Mozilla roots plus
+  // NODE_EXTRA_CA_CERTS. Export the current Windows trust store with any
+  // configured public certificates; never copy raw payload/comments.
+  const system = process.platform === "win32" ? getCACertificates("system") : [];
+  const pem = [...system, ...(extra ? [extra] : [])].join("\n");
   if (pem.includes("-----BEGIN CERTIFICATE-----")) {
     const caDir = join(dataDir, "proxy");
     await mkdir(caDir, { recursive: true });

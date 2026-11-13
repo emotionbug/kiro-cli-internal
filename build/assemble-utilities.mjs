@@ -21,9 +21,11 @@ export async function assembleUtilities({
   await mkdir(toolsRoot, { recursive: true });
   await mkdir(path.join(licenses, "sources"), { recursive: true });
   await extract(acquired.python, pythonRoot);
+  const pythonVersion = inputs.assets.python.version;
+  const pythonTag = `python${pythonVersion.split(".").slice(0, 2).join("")}`;
   assert.equal(
-    (await readFile(path.join(pythonRoot, "python313._pth"), "utf8")).replaceAll("\r", ""),
-    "python313.zip\n.\n\n# Uncomment to run site.main() automatically\n#import site\n",
+    (await readFile(path.join(pythonRoot, `${pythonTag}._pth`), "utf8")).replaceAll("\r", ""),
+    `${pythonTag}.zip\n.\n\n# Uncomment to run site.main() automatically\n#import site\n`,
   );
   const bootstrap = path.join(work, "python-utility-config");
   await mkdir(bootstrap);
@@ -38,10 +40,10 @@ export async function assembleUtilities({
     inputs.sourceDateEpoch,
   );
   await writeFile(
-    path.join(pythonRoot, "python313._pth"),
-    "# Bundle customization: isolated stdlib + UTF-8 stdio bootstrap.\npython313.zip\n.\nutility-config.zip\nimport site\n",
+    path.join(pythonRoot, `${pythonTag}._pth`),
+    `# Bundle customization: isolated stdlib + UTF-8 stdio bootstrap.\n${pythonTag}.zip\n.\nutility-config.zip\nimport site\n`,
   );
-  // CPython resolves python313._pth from its shared library, ahead of EXE names.
+  // CPython resolves its ._pth from its shared library, ahead of EXE names.
   await copyFile(path.join(pythonRoot, "python.exe"), path.join(pythonRoot, "python3.exe"));
   assert.equal(
     await digest(path.join(pythonRoot, "python.exe")),
@@ -49,7 +51,10 @@ export async function assembleUtilities({
   );
   const sbom = JSON.parse(await readFile(acquired.pythonSbom, "utf8"));
   const pythonPackage = sbom.packages.find((item) => item.name === "CPython");
-  assert.equal(pythonPackage.packageFileName, "python-3.13.12-embed-amd64.zip");
+  assert.equal(
+    pythonPackage.packageFileName,
+    path.posix.basename(new URL(inputs.assets.python.url).pathname),
+  );
   assert.equal(
     pythonPackage.checksums.find((item) => item.algorithm === "SHA256").checksumValue,
     inputs.assets.python.sha256,
@@ -78,8 +83,8 @@ export async function assembleUtilities({
     /\/(?:COPYING[^/]*|LICENSE[^/]*|NOTICE[^/]*|AUTHORS)$/.test(name),
   );
   const licenseCopies = {
-    pythonSource: "sources/Python-3.13.12.tgz",
-    jqSource: "sources/jq-1.8.1.tar.gz",
+    pythonSource: `sources/${path.posix.basename(new URL(inputs.assets.pythonSource.url).pathname)}`,
+    jqSource: `sources/${path.posix.basename(new URL(inputs.assets.jqSource.url).pathname)}`,
     pythonSbom: "python/UPSTREAM-SBOM.spdx.json",
     pythonSignature: "python/UPSTREAM-EMBED.sigstore.json",
     pythonSourceSignature: "python/UPSTREAM-SOURCE.sigstore.json",
@@ -96,7 +101,7 @@ export async function assembleUtilities({
     await copyFile(acquired[name], path.join(licenses, relative));
   await writeFile(
     path.join(licenses, "UTILITY-CHANGES.txt"),
-    'CPython 3.13.12 official embeddable Windows x64 package is retained with its native modules and upstream license. Changes: python313._pth enables import site and a relative utility-config.zip; that ZIP contains our sitecustomize.py which explicitly sets stdin/stdout/stderr to UTF-8 with surrogateescape. python3.exe is an unmodified byte-for-byte copy of python.exe. The standard-library ZIP and native binaries are unmodified. ZIP-imported startup customization does not create __pycache__. Normal isolated search paths do not implicitly import project CWD or script-directory modules; scripts may explicitly configure sys.path. PYTHONHOME/PYTHONPATH/PYTHONUTF8 are ignored by upstream isolated mode, not set globally by this bundle. Explicit -S bypasses our stdio customization. Text-file open() still needs encoding="utf-8" when portable UTF-8 files are intended. pip/ensurepip, Tk and full project environments are not provided. Use an explicitly activated project environment for project dependencies.\nRipgrep complete upstream portable ZIP is retained in runtime/tools/ripgrep; its unmodified executable is also exposed as runtime/tools/rg.exe. jq.exe is the unmodified upstream Windows amd64 executable. Complete jq source, incorporated license notices and supplementary GCC/MinGW runtime terms are retained. These supplemental license versions identify license text, not an assertion of the binary compiler version. Additional POSIX utilities remain in the complete Git for Windows distribution; no second Unix toolkit or utility daemon is installed.\n',
+    `CPython ${pythonVersion} official embeddable Windows x64 package is retained with its native modules and upstream license. Changes: ${pythonTag}._pth enables import site and a relative utility-config.zip; that ZIP contains our sitecustomize.py which explicitly sets stdin/stdout/stderr to UTF-8 with surrogateescape. python3.exe is an unmodified byte-for-byte copy of python.exe. The standard-library ZIP and native binaries are unmodified. ZIP-imported startup customization does not create __pycache__. Normal isolated search paths do not implicitly import project CWD or script-directory modules; scripts may explicitly configure sys.path. PYTHONHOME/PYTHONPATH/PYTHONUTF8 are ignored by upstream isolated mode, not set globally by this bundle. Explicit -S bypasses our stdio customization. Text-file open() still needs encoding="utf-8" when portable UTF-8 files are intended. pip/ensurepip, Tk and full project environments are not provided. Use an explicitly activated project environment for project dependencies.\nRipgrep ${inputs.assets.rg.version} complete upstream portable ZIP is retained in runtime/tools/ripgrep; its unmodified executable is also exposed as runtime/tools/rg.exe. jq ${inputs.assets.jq.version} jq.exe is the unmodified upstream Windows amd64 executable. Complete jq source, incorporated license notices and supplementary GCC/MinGW runtime terms are retained. These supplemental license versions identify license text, not an assertion of the binary compiler version. Additional POSIX utilities remain in the complete Git for Windows distribution; no second Unix toolkit or utility daemon is installed.\n`,
   );
 
   const staticImports = [];

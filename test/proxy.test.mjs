@@ -181,21 +181,31 @@ test("direct mode removes stale proxies, enforces loopback bypass and strict TLS
 
 test("owned Node fetch and http route remote destinations, but local HTTP and WebSocket bypass", async () => {
   let proxyHits = 0;
+  const destinations = [];
   const privateToken = "Basic " + Buffer.from("kiro:" + "a".repeat(64)).toString("base64");
   const proxy = http.createServer((req, res) => {
     assert.equal(req.headers["proxy-authorization"], privateToken);
     proxyHits++;
-    res.end("upstream:" + req.url);
+    destinations.push(req.url);
+    res.end("upstream");
   });
-  // Undici uses CONNECT for HTTP as well as HTTPS.
+  // A proxy may receive HTTP in absolute form or through a CONNECT tunnel.
   const tunnels = new Set();
   proxy.on("connect", (req, socket) => {
     assert.equal(req.headers["proxy-authorization"], privateToken);
     proxyHits++;
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-    socket.once("data", () =>
-      socket.end("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nupstream"),
-    );
+    let request = "";
+    const onRequest = (bytes) => {
+      request += bytes.toString("ascii");
+      if (!request.includes("\r\n")) return;
+      socket.off("data", onRequest);
+      const [method, target] = request.split("\r\n", 1)[0].split(" ");
+      assert.equal(method, "GET");
+      destinations.push(new URL(target, `http://${req.url}`).href);
+      socket.end("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nupstream");
+    };
+    socket.on("data", onRequest);
     tunnels.add(socket);
     socket.on("close", () => tunnels.delete(socket));
   });
@@ -219,7 +229,7 @@ test("owned Node fetch and http route remote destinations, but local HTTP and We
       const local = await (await fetch('http://127.0.0.1:${localPort}/')).text();
       if (local !== 'direct') throw new Error(local);
       const body = await new Promise((resolve,reject) => http.get('http://another.fixture.invalid/',r => {let s='';r.on('data',x=>s+=x);r.on('end',()=>resolve(s));}).on('error',reject));
-      if (!body.startsWith('upstream:')) throw new Error(body);
+      if (body !== 'upstream') throw new Error(body);
       await new Promise((resolve,reject) => {
         const r=http.get('http://127.0.0.1:${localPort}/',{headers:{Connection:'Upgrade',Upgrade:'websocket'}});
         r.on('upgrade',(_,s)=>{s.destroy();resolve();});r.on('error',reject);
@@ -230,6 +240,10 @@ test("owned Node fetch and http route remote destinations, but local HTTP and We
     );
     assert.equal(out, "ok");
     assert.equal(proxyHits, 2);
+    assert.deepEqual(destinations.sort(), [
+      "http://another.fixture.invalid/",
+      "http://remote.fixture.invalid/test",
+    ]);
   } finally {
     for (const socket of tunnels) socket.destroy();
     await Promise.all([stop(proxy), stop(local)]);

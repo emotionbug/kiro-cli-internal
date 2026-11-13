@@ -18,8 +18,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const bundleRoot = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 export const pluginRoot = path.join(bundleRoot, "app/plugin/omp-kiro");
-export const pluginPin = "92d92161471c849780899264a9dc345bc7f7e82e";
+export const pluginExtension = path.join(pluginRoot, "index.js");
+export const pluginPin = "8056e05380e545afed6a093a1e6e550b4a59fd0d";
 export const profileId = "kiro-http";
+export const daemonExecutable = path.join(bundleRoot, "runtime/passession/paseo.exe");
+export const appExecutable = path.join(bundleRoot, "runtime/passession-app/paseo_sessions.exe");
+export const ompExecutable = path.join(bundleRoot, "runtime/omp/omp.exe");
+export const ompNetworkPolicy = path.join(bundleRoot, "app/omp-network-policy.json");
+// Passession's OMP family maps these mode IDs to --approval-mode yolo|write|always-ask.
+export const ompModes = ["full", "write", "ask"];
+// Built-in Passession providers. This private home exposes only Kiro HTTP.
+const builtinProviders = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
 
 export async function json(file, fallback = null) {
   try {
@@ -64,8 +73,9 @@ export async function save(file, value, expected) {
   }
 }
 export async function command(executable, args, options = {}) {
+  const { input, ...spawnOptions } = options;
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true, stdio: "pipe", ...options });
+    const child = spawn(executable, args, { windowsHide: true, stdio: "pipe", ...spawnOptions });
     let stdout = "",
       stderr = "",
       bytes = 0,
@@ -82,6 +92,8 @@ export async function command(executable, args, options = {}) {
     };
     child.stdout?.on("data", (data) => collect(data, false));
     child.stderr?.on("data", (data) => collect(data, true));
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(input);
     child.once("error", reject);
     child.once("close", (code) =>
       overflow
@@ -174,7 +186,10 @@ export async function initialize(dataDir) {
   }
   if (state?.format !== "kiro-internal-user-data" || state.version !== 1)
     throw new Error("Unrecognized user data format.");
-  for (const name of ["paseo", "proxy"]) {
+  // Native Passession, OMP and desktop state use new directories. Earlier
+  // Node-Paseo homes (paseo/) and native-HTTP plugin history (.local/state) are
+  // never opened, migrated or reinterpreted.
+  for (const name of ["passession", "omp", "gui", "proxy"]) {
     const dir = path.join(root, name);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const info = await lstat(dir);
@@ -212,9 +227,47 @@ export async function initialize(dataDir) {
     root,
     config,
     configFile,
-    home: path.join(root, "paseo"),
+    home: path.join(root, "passession"),
+    ompDir: path.join(root, "omp"),
+    guiDir: path.join(root, "gui"),
     authFile: path.join(root, "auth.sqlite3"),
   };
+}
+// OMP (pi-utils dirs.ts) keeps agent state (agent.db login/settings, models.db,
+// sessions, history, extensions, commands, memories) under the absolute
+// PI_CODING_AGENT_DIR. Its machine-level root (logs, caches, stats, worktrees,
+// run/daemon and security state) is path.join(os.homedir(), PI_CONFIG_DIR),
+// so PI_CONFIG_DIR must be relative to the child's profile. A data directory on
+// another drive cannot be reached relatively; it gets a dedicated root per data
+// directory instead of sharing the user's ~/.omp.
+export function ompConfigDir(state, home = homedir()) {
+  const relative = path.relative(home, state.ompDir);
+  if (relative && !path.isAbsolute(relative)) return relative;
+  const identity = path.resolve(state.root);
+  return path.join(
+    ".kiro-internal-omp",
+    createHash("sha256")
+      .update(process.platform === "win32" ? identity.toLowerCase() : identity)
+      .digest("hex"),
+  );
+}
+export function ompMachineRoot(state, home = homedir()) {
+  return path.join(home, ompConfigDir(state, home));
+}
+export function ompEnvironment(state, home = homedir()) {
+  return {
+    PI_CONFIG_DIR: ompConfigDir(state, home),
+    PI_CODING_AGENT_DIR: path.join(state.ompDir, "agent"),
+    OMP_KIRO_AUTH_FILE: state.authFile,
+    OMP_KIRO_MODEL_CATALOG_FILE: path.join(state.root, "models.json"),
+  };
+}
+// The profile directory the child process will see (libuv/Bun os.homedir():
+// USERPROFILE on Windows, HOME elsewhere), not necessarily this process's.
+function environmentHome(entries) {
+  const name = process.platform === "win32" ? /^userprofile$/i : /^home$/;
+  const value = entries.find(([key]) => name.test(key))?.[1];
+  return value && path.isAbsolute(value) ? value : homedir();
 }
 export function runtimeEnv(state, env = process.env) {
   const entries = Object.entries(env);
@@ -236,10 +289,13 @@ export function runtimeEnv(state, env = process.env) {
       : condaPrefix && path.isAbsolute(condaPrefix)
         ? condaPrefix
         : null;
+  // PASEO_* includes PASEO_PASSWORD/PASEO_LISTEN/PASEO_HOST: an inherited value
+  // would override this daemon's stored password or select another daemon. The
+  // private CLI and desktop app authenticate with the home's local credential.
   const clean = Object.fromEntries(
     entries.filter(
       ([key]) =>
-        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|OMP_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$|XDG_STATE_HOME$)/i.test(
+        !/^(?:PATH$|NO_PROXY$|PASEO_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_CODING_AGENT_SESSION_DIR$|PI_PROFILE$|PI_COMMAND$|PI_ACP_PI_COMMAND$|OMP_|KIRO_INTERNAL_DATA_DIR$|NODE_OPTIONS$|BUN_OPTIONS$|BUN_BE_BUN$)/i.test(
           key,
         ),
     ),
@@ -258,15 +314,14 @@ export function runtimeEnv(state, env = process.env) {
       ...(!activePython ? [inheritedPath] : []),
     ].join(path.delimiter),
     PASEO_HOME: state.home,
-    XDG_STATE_HOME: path.join(state.root, ".local", "state"),
     NO_PROXY: noProxy,
     no_proxy: noProxy,
     NODE_OPTIONS: `--max-old-space-size=${state.config.nodeHeapMb}`,
-    OMP_KIRO_AUTH_FILE: state.authFile,
-    OMP_KIRO_MODEL_CATALOG_FILE: path.join(state.root, "models.json"),
+    ...ompEnvironment(state, environmentHome(entries)),
     KIRO_INTERNAL_DATA_DIR: state.root,
   };
 }
+// Passession model selectors for the OMP family are `<OMP provider>/<model id>`.
 export function modelRows(catalog) {
   if (!Array.isArray(catalog) || !catalog.length)
     throw new Error("No account model metadata. Run auth.cmd login, then models.cmd.");
@@ -282,12 +337,17 @@ export function modelRows(catalog) {
     ids.add(model.id);
   }
   return catalog.map((model) => ({
-    id: model.id,
+    id: `${profileId}/${model.id}`,
     label: typeof model.name === "string" && model.name.trim() ? model.name : model.id,
     ...(model.id === "auto" ? { isDefault: true } : {}),
   }));
 }
-export async function configurePaseo(state, { passwordHash, port = state.config.port } = {}) {
+const exists = (file) =>
+  lstat(file).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+export async function configureDaemon(state, { passwordHash, port = state.config.port } = {}) {
   const file = path.join(state.home, "config.json");
   const original = await readFile(file, "utf8").catch((error) => {
     if (error.code === "ENOENT") return null;
@@ -296,15 +356,7 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
   const previous = original ? JSON.parse(original) : {};
   const catalogFile = path.join(state.root, "models.json");
   let models = [];
-  const authExists = await lstat(state.authFile).catch((error) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  const catalogExists = await lstat(catalogFile).catch((error) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (authExists && catalogExists) {
+  if ((await exists(state.authFile)) && (await exists(catalogFile))) {
     const load = (file) => import(pathToFileURL(path.join(pluginRoot, "server", file)).href);
     const [{ readKiroAuth }, { readKiroModelCatalog }] = await Promise.all([
       load("auth.mjs"),
@@ -315,14 +367,13 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
       const catalog = await readKiroModelCatalog(catalogFile, { auth });
       if (catalog.length) models = modelRows(catalog);
     } catch {
-      console.warn("Kiro HTTP profile disabled: authenticate and run models.cmd to refresh this account's catalog.");
+      console.warn("Kiro HTTP provider disabled: authenticate and run models.cmd to refresh this account's catalog.");
     }
   }
-  const providers = {};
   const previousProvider = previous.agents?.providers?.[profileId];
-  // Keep desired activation separate from catalog gating: [] triggers runtime
-  // discovery in Paseo, so an empty account catalog must disable this profile.
-  const gateFile = path.join(state.root, "paseo-profile.json");
+  // Keep desired activation separate from catalog gating: an empty model list
+  // would make Passession discover OMP models itself, so no catalog disables it.
+  const gateFile = path.join(state.root, "passession-profile.json");
   const storedGate = await json(gateFile);
   const gate = storedGate?.profileId === profileId ? storedGate : null;
   const configurationHash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -337,19 +388,32 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
   )
     requestedEnabled = previousProvider.enabled;
   const appliedEnabled = models.length > 0 && requestedEnabled;
+  const providers = Object.fromEntries(builtinProviders.map((id) => [id, { enabled: false }]));
+  const previousOptions =
+    previousProvider?.options && typeof previousProvider.options === "object"
+      ? previousProvider.options
+      : {};
   providers[profileId] = {
-    enabled: appliedEnabled,
+    extends: "omp",
     label: "Kiro HTTP",
+    // --trusted-extension loads exactly this bundled module and disables OMP's
+    // ambient extension/plugin discovery. No npm or network is used to load it.
+    command: [ompExecutable, "--trusted-extension", pluginExtension, "--config", ompNetworkPolicy],
     env: {
       ...Object.fromEntries(
         Object.entries(previousProvider?.env ?? {}).filter(
-          ([key]) => !/^(?:OMP_|PI_CONFIG_DIR$|PI_CODING_AGENT_DIR$|PI_PROFILE$|HOME$|USERPROFILE$|NODE_OPTIONS$|XDG_STATE_HOME$)/i.test(key),
+          ([key]) =>
+            !/^(?:OMP_|PI_|PASEO_|HOME$|USERPROFILE$|NODE_OPTIONS$|BUN_|XDG_|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$|NODE_EXTRA_CA_CERTS$)/i.test(
+              key,
+            ),
         ),
       ),
-      OMP_KIRO_AUTH_FILE: state.authFile,
-      OMP_KIRO_MODEL_CATALOG_FILE: catalogFile,
-      XDG_STATE_HOME: path.join(state.root, ".local", "state"),
+      ...ompEnvironment(state),
     },
+    // Compiled OMP plus extension loading can exceed the 20 s default ready
+    // wait on a cold Windows start; an explicit user value is retained.
+    options: { rpcTimeoutMs: 120000, ...previousOptions },
+    enabled: appliedEnabled,
     models,
   };
   const profiles = (previous.daemon?.agentProfiles ?? []).filter(
@@ -379,7 +443,7 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
     id: profileId,
     name: previousProfile?.name ?? "Kiro HTTP",
     provider: profileId,
-    modeId: previousProfile?.modeId ?? "full",
+    modeId: ompModes.includes(previousProfile?.modeId) ? previousProfile.modeId : "full",
     cliDefault: appliedCliDefault,
     ...(preferred ? { model: preferred.id } : {}),
   });
@@ -389,30 +453,16 @@ export async function configurePaseo(state, { passwordHash, port = state.config.
     daemon: {
       ...previous.daemon,
       listen: `127.0.0.1:${port}`,
+      cors: { allowedOrigins: previous.daemon?.cors?.allowedOrigins ?? [] },
       relay: { ...previous.daemon?.relay, enabled: false },
       auth: { ...previous.daemon?.auth, ...(passwordHash ? { password: passwordHash } : {}) },
       git: { ...previous.daemon?.git, maxProcessConcurrency: 2, maxProcessesPerSecond: 8 },
       agentProfiles: profiles,
     },
-    features: {
-      ...previous.features,
-      webUi: { ...previous.features?.webUi, enabled: true },
-      dictation: { ...previous.features?.dictation, enabled: false },
-      voiceMode: { ...previous.features?.voiceMode, enabled: false },
-    },
     agents: {
       ...previous.agents,
       providers,
       metadataGeneration: { ...previous.agents?.metadataGeneration, providers: [] },
-    },
-    pluginsEnabled: previous.pluginsEnabled ?? true,
-    plugins: {
-      // Only the pinned native Kiro provider is part of this package.
-      "omp-kiro": {
-        source: "directory",
-        path: pluginRoot,
-        enabled: previous.plugins?.["omp-kiro"]?.enabled ?? true,
-      },
     },
   };
   await save(file, next, original);
