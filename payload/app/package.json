@@ -1,6 +1,6 @@
 {
   "name": "kiro-internal-portable-runtime",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Build-time dependency root for the wrapper/auth Node processes; node_modules is shipped fully materialized for Windows x64. Passession and OMP are native executables, not npm packages.",
   "type": "module",

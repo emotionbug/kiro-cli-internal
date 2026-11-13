@@ -19,7 +19,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       QUALIFIED_RUN_ID: ${{ inputs.qualified_run_id }}
-      BUNDLE_NAME: kiro-passession-omp-http-0.6.0-windows-x64
+      BUNDLE_NAME: kiro-passession-omp-http-0.6.1-windows-x64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +63,7 @@ jobs:
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
           $report = Get-Content -LiteralPath (Join-Path $reportRoot 'report.json') -Raw | ConvertFrom-Json
           if ($manifest.target -ne 'win32-x64' -or $manifest.archive.filename -ne $zipName -or
-              $manifest.packageVersion -ne '0.6.0' -or
+              $manifest.packageVersion -ne '0.6.1' -or
               -not $manifest.proxy.validation.memory.budgetPassed -or $manifest.compatibility.server2019Verified -or
               $report.result -ne 'passed' -or -not $report.privateFixturesRemoved -or
               $report.chain.provider -ne 'kiro-http' -or $report.chain.engine -ne 'omp' -or
@@ -153,11 +153,11 @@ jobs:
               'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
             }
           }
-          $notes = Get-Content -LiteralPath 'releases/0.6.0/RELEASE.md' -Raw
+          $notes = Get-Content -LiteralPath 'releases/0.6.1/RELEASE.md' -Raw
           $notes += "`n## 배포 무결성`n- ZIP SHA-256: ``$zipSha```n- ZIP bytes: $((Get-Item -LiteralPath $zipPath).Length)`n- 내부 파일 $($seen.Count)개를 스트리밍 SHA-256으로 재검증했습니다.`n- 검증한 소스: ``$env:QUALIFIED_SOURCE_SHA```n- [Windows 전체 검증](https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:QUALIFIED_RUN_ID)`n"
           $notesPath = Join-Path $root 'release-notes.md'
           [IO.File]::WriteAllText($notesPath, $notes)
-          $tag = 'v0.6.0'
+          $tag = 'v0.6.1'
           $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release drafts' }
           $existing = @($releases | Where-Object { $_.tag_name -eq $tag })
@@ -177,7 +177,7 @@ jobs:
             throw 'Release tag does not bind the qualified source commit'
           }
           if ($existing.Count -eq 0) {
-            gh release create $tag @assets --draft --prerelease --target $env:QUALIFIED_SOURCE_SHA --title 'Passession + OMP + Kiro HTTP 0.6.0 · Windows x64 portable' --notes-file $notesPath
+            gh release create $tag @assets --draft --prerelease --target $env:QUALIFIED_SOURCE_SHA --title 'Passession + OMP + Kiro HTTP 0.6.1 · SSO connection fix' --notes-file $notesPath
             if ($LASTEXITCODE -ne 0) { throw 'Release draft creation/upload failed; no existing release is overwritten' }
             $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0) { throw 'Cannot read uploaded release draft' }

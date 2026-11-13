@@ -23,10 +23,10 @@
 #include <vector>
 
 namespace {
-constexpr size_t HeaderLimit = 65536, BufferSize = 16384, QueueLimit = 16;
+constexpr size_t HeaderLimit = 65536, BufferSize = 16384, QueueLimit = 16, TunnelLimit = 128;
 std::atomic<bool> stopping{false};
-std::mutex socketsMutex, queueMutex, routeMutex;
-std::condition_variable queueReady;
+std::mutex socketsMutex, queueMutex, routeMutex, tunnelMutex;
+std::condition_variable queueReady, tunnelReady;
 std::vector<SOCKET> sockets;
 std::deque<SOCKET> pending;
 std::atomic<SOCKET> listener{INVALID_SOCKET};
@@ -64,6 +64,7 @@ void stop() {
     { std::lock_guard<std::mutex> lock(socketsMutex); for (auto s : sockets) shutdown(s, SD_BOTH); }
     SOCKET listening = listener.exchange(INVALID_SOCKET); if (listening != INVALID_SOCKET) closesocket(listening);
     queueReady.notify_all();
+    tunnelReady.notify_all();
 }
 BOOL WINAPI control(DWORD type) { return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ? TRUE : FALSE; }
 void timeout(SOCKET s) { DWORD ms = 30000; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&ms), sizeof(ms)); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<char*>(&ms), sizeof(ms)); }
@@ -379,6 +380,111 @@ void duplex(SOCKET client, SOCKET upstream, BodyFrame* body = nullptr, ResponseF
         }
     }
 }
+// A CONNECT/WebSocket lifetime must not occupy a connection-setup worker.
+// One poller owns all established opaque tunnels, with fixed memory/capacity.
+struct Tunnel {
+    struct Flow {
+        SOCKET from, to;
+        std::array<char, BufferSize> bytes;
+        size_t begin = 0, end = 0;
+        bool eof = false, shut = false;
+        Flow(SOCKET source, SOCKET destination) : from(source), to(destination) {}
+    };
+    std::array<Flow, 2> flows;
+    ULONGLONG active = GetTickCount64();
+    Tunnel(SOCKET client, SOCKET upstream) : flows{{{client, upstream}, {upstream, client}}} {}
+    Tunnel(const Tunnel&) = delete;
+    ~Tunnel() { release(flows[0].from); release(flows[1].from); }
+    bool finished() {
+        bool done = true;
+        for (auto& f : flows) {
+            if (!f.eof || f.begin < f.end) done = false;
+            if (f.eof && f.begin == f.end && !f.shut) { shutdown(f.to, SD_SEND); f.shut = true; }
+        }
+        return done || GetTickCount64() - active > 600000;
+    }
+    bool pump(const WSAPOLLFD* events) {
+        for (size_t i = 0; i < flows.size(); ++i) {
+            auto& f = flows[i];
+            if ((events[i].revents | events[1 - i].revents) & (POLLERR | POLLNVAL)) return false;
+            if (f.begin < f.end && (events[1 - i].revents & POLLWRNORM)) {
+                int n = send(f.to, f.bytes.data() + f.begin, static_cast<int>(f.end - f.begin), 0);
+                if (n > 0) { f.begin += n; active = GetTickCount64(); if (f.begin == f.end) f.begin = f.end = 0; }
+                else if (WSAGetLastError() != WSAEWOULDBLOCK) return false;
+            }
+            if (!f.eof && f.end < f.bytes.size() && (events[i].revents & (POLLRDNORM | POLLHUP))) {
+                int n = recv(f.from, f.bytes.data() + f.end, static_cast<int>(f.bytes.size() - f.end), 0);
+                if (n > 0) { f.end += n; active = GetTickCount64(); }
+                else if (n == 0) f.eof = true;
+                else if (WSAGetLastError() != WSAEWOULDBLOCK) return false;
+            }
+        }
+        return true;
+    }
+};
+std::array<std::optional<Tunnel>, TunnelLimit> tunnels;
+size_t tunnelCount = 0;
+void handoffTunnel(Socket& client, Socket& upstream, const std::string& header) {
+    std::lock_guard<std::mutex> lock(tunnelMutex);
+    if (stopping) throw "shutdown";
+    auto free = std::find_if(tunnels.begin(), tunnels.end(), [](const auto& slot) { return !slot; });
+    // Reject before CONNECT/Upgrade succeeds; never park an admitted tunnel in
+    // the setup queue or silently evict an existing conversation.
+    if (free == tunnels.end()) throw "tunnel-capacity";
+    u_long nonblock = 1;
+    if (ioctlsocket(client.s, FIONBIO, &nonblock) || ioctlsocket(upstream.s, FIONBIO, &nonblock)) throw "nonblock";
+    if (!sendAll(client.s, header)) return;
+    free->emplace(client.s, upstream.s);
+    client.s = upstream.s = INVALID_SOCKET;
+    ++tunnelCount;
+    tunnelReady.notify_one();
+}
+void relayTunnels() {
+    std::array<WSAPOLLFD, TunnelLimit * 2> polls;
+    std::array<size_t, TunnelLimit> slots;
+    std::array<std::array<size_t, 2>, TunnelLimit> indices;
+    while (!stopping) {
+        size_t count = 0, pollCount = 0;
+        {
+            std::unique_lock<std::mutex> lock(tunnelMutex);
+            tunnelReady.wait(lock, [] { return stopping || tunnelCount != 0; });
+            if (stopping) break;
+            for (size_t i = 0; i < tunnels.size(); ++i) {
+                auto& tunnel = tunnels[i];
+                if (!tunnel) continue;
+                if (tunnel->finished()) { tunnel.reset(); --tunnelCount; continue; }
+                slots[count] = i;
+                for (size_t j = 0; j < 2; ++j) {
+                    const auto& incoming = tunnel->flows[j];
+                    const auto& outgoing = tunnel->flows[1 - j];
+                    short events = 0;
+                    if (!incoming.eof && incoming.end < incoming.bytes.size()) events |= POLLRDNORM;
+                    if (outgoing.begin < outgoing.end) events |= POLLWRNORM;
+                    indices[count][j] = polls.size();
+                    if (events) {
+                        indices[count][j] = pollCount;
+                        polls[pollCount++] = {incoming.from, events, 0};
+                    }
+                }
+                ++count;
+            }
+        }
+        if (!count) continue;
+        // Slots in this snapshot can only be removed by this poller. Workers
+        // may fill other slots while it waits, without blocking new handshakes.
+        int rc = WSAPoll(polls.data(), static_cast<ULONG>(pollCount), 50);
+        std::lock_guard<std::mutex> lock(tunnelMutex);
+        for (size_t i = 0; i < count; ++i) {
+            auto& tunnel = tunnels[slots[i]];
+            WSAPOLLFD ready[2]{};
+            for (size_t j = 0; j < 2; ++j) if (indices[i][j] < pollCount) ready[j].revents = polls[indices[i][j]].revents;
+            if (rc < 0 || !tunnel->pump(ready)) { tunnel.reset(); --tunnelCount; }
+        }
+    }
+    std::lock_guard<std::mutex> lock(tunnelMutex);
+    for (auto& tunnel : tunnels) tunnel.reset();
+    tunnelCount = 0;
+}
 void serve(SOCKET client) {
     Socket owner{client}; bool replied = false;
     try {
@@ -393,7 +499,7 @@ void serve(SOCKET client) {
         else { if (destination.rfind("http://", 0) != 0) throw "absolute-http-required"; auto slash = destination.find('/', 7); authority = destination.substr(7, slash == std::string::npos ? slash : slash - 7); path = slash == std::string::npos ? "/" : destination.substr(slash); target = endpoint(authority, "80"); url = destination; }
         if (url.size() > 8192) throw "url-limit";
         auto proxyName = route(url, target, tunnel); bool throughProxy = !proxyName.empty(); Endpoint upstreamTarget = throughProxy ? endpoint(proxyName, "80") : target; Socket upstream{connectTo(upstreamTarget)};
-        if (tunnel && !throughProxy) { if (!sendAll(client, "HTTP/1.1 200 Connection Established\r\n\r\n")) return; replied = true; duplex(client, upstream.s); return; }
+        if (tunnel && !throughProxy) { handoffTunnel(owner, upstream, "HTTP/1.1 200 Connection Established\r\n\r\n"); return; }
         BodyFrame bodyFrame(request);
         const bool body = !tunnel && !bodyFrame.done();
         bool expect = body && throughProxy;
@@ -416,9 +522,10 @@ void serve(SOCKET client) {
             if (lower(request.get("expect")) == "100-continue") sendAll(client, "HTTP/1.1 100 Continue\r\n\r\n");
             if (upgrade) {
                 auto response = readHeader(upstream.s); auto code = status(response);
-                sendAll(client, responseHeader(response, code != 101)); replied = true;
+                if (code == 101) { handoffTunnel(owner, upstream, responseHeader(response)); return; }
+                sendAll(client, responseHeader(response, true)); replied = true;
                 BodyFrame noBody(Header{}); ResponseFrame framed(response, method == "HEAD");
-                duplex(client, upstream.s, code == 101 ? nullptr : &noBody, code == 101 ? nullptr : &framed);
+                duplex(client, upstream.s, &noBody, &framed);
             } else { replied = true; ResponseFrame framed(method == "HEAD"); duplex(client, upstream.s, &bodyFrame, &framed); }
             return;
         }
@@ -446,15 +553,16 @@ void serve(SOCKET client) {
                     sendAll(client, responseHeader(response, true)); replied = true;
                     BodyFrame noBody(Header{}); ResponseFrame framed(response, false); duplex(client, upstream.s, &noBody, &framed); return;
                 }
-                sendAll(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); replied = true; duplex(client, upstream.s); return;
+                handoffTunnel(owner, upstream, "HTTP/1.1 200 Connection Established\r\n\r\n"); return;
             }
             if (code == 100) {
                 if (lower(request.get("expect")) == "100-continue") sendAll(client, responseHeader(response));
                 replied = true; ResponseFrame framed(method == "HEAD"); duplex(client, upstream.s, &bodyFrame, &framed); return;
             }
-            sendAll(client, responseHeader(response, code != 101)); replied = true;
+            if (code == 101) { handoffTunnel(owner, upstream, responseHeader(response)); return; }
+            sendAll(client, responseHeader(response, true)); replied = true;
             BodyFrame noBody(Header{}); ResponseFrame framed(response, method == "HEAD");
-            duplex(client, upstream.s, code == 101 ? nullptr : &noBody, code == 101 ? nullptr : &framed); return;
+            duplex(client, upstream.s, &noBody, &framed); return;
         }
         throw "auth-rounds";
     } catch (...) { if (!replied && !stopping) errorResponse(client, 502); }
@@ -483,9 +591,9 @@ void loadSystem() {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 2 && std::string(argv[1]) == "--version") { std::puts("kiro-proxy 1 winhttp-sspi workers=8 queue=16 buffer=16384 routes=32"); return 0; }
+    if (argc == 2 && std::string(argv[1]) == "--version") { std::puts("kiro-proxy 2 winhttp-sspi workers=8 queue=16 tunnels=128 buffer=16384 routes=32"); return 0; }
     WSADATA data{}; if (WSAStartup(MAKEWORD(2, 2), &data)) return 1;
-    std::vector<std::thread> workers; std::thread input; int result = 0;
+    std::vector<std::thread> workers; std::thread input, relay; int result = 0;
     try {
         if (configLine() != "KIRO_PROXY_V1") throw "protocol";
         auto nonce = configLine(); if (nonce.size() != 64 || nonce.find_first_not_of("0123456789abcdef") != std::string::npos) throw "nonce";
@@ -517,6 +625,7 @@ int main(int argc, char** argv) {
         if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) || listen(listener, 16)) throw "listen";
         int length = sizeof(address); if (getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length)) throw "listen";
         for (int i = 0; i != 8; ++i) workers.emplace_back(worker);
+        relay = std::thread(relayTunnels);
         if (stopping) throw "shutdown";
         std::printf("KIRO_PROXY_READY %u\n", ntohs(address.sin_port)); std::fflush(stdout);
         while (!stopping) { SOCKET s = accept(listener, nullptr, nullptr); if (s == INVALID_SOCKET) break; track(s); { std::lock_guard<std::mutex> lock(queueMutex); if (pending.size() == QueueLimit) release(s); else { pending.push_back(s); queueReady.notify_one(); } } }
@@ -525,6 +634,7 @@ int main(int argc, char** argv) {
     stop();
     if (input.joinable()) input.join();
     for (auto& w : workers) if (w.joinable()) w.join();
+    if (relay.joinable()) relay.join();
     { std::lock_guard<std::mutex> lock(socketsMutex); for (auto s : sockets) closesocket(s); sockets.clear(); }
     if (session) WinHttpCloseHandle(session); WSACleanup(); return result;
 }

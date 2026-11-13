@@ -659,6 +659,211 @@ test(
 );
 
 test(
+  "Windows long-lived tunnels do not block OIDC refresh or lose existing conversations",
+  { skip: process.platform !== "win32", timeout: 60000 },
+  async () => {
+    assert.ok(bundleRoot, "Set KIRO_TEST_BUNDLE_ROOT to the fully staged Windows bundle.");
+    const dir = await mkdtemp(join(tmpdir(), "kiro-native-oidc-"));
+    const sockets = new Set();
+    const held = [];
+    const requests = [];
+    const track = (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.on("error", () => {});
+      return socket;
+    };
+    const tls = https.createServer({ key, cert }, (req, res) => {
+      let body = "";
+      req.on("data", (data) => { body += data; });
+      req.on("end", () => {
+        requests.push({ method: req.method, path: req.url, body: JSON.parse(body) });
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({
+          accessToken: `refreshed-access-${requests.length}`,
+          refreshToken: `rotated-refresh-${requests.length}`,
+          expiresIn: 3600,
+          tokenType: "Bearer",
+        }));
+      });
+    });
+    tls.on("connection", track);
+    const tlsPort = await listen(tls);
+    const upstream = http.createServer();
+    upstream.on("connection", track);
+    upstream.on("connect", (req, socket, head) => {
+      assert.equal(req.headers["proxy-authorization"], undefined);
+      if (req.url === "oidc.ap-northeast-2.amazonaws.com:443") {
+        const remote = track(net.connect(tlsPort, "127.0.0.1", () => {
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (head.length) remote.write(head);
+          socket.pipe(remote); remote.pipe(socket);
+        }));
+        socket.on("close", () => remote.destroy());
+        remote.on("close", () => socket.destroy());
+      } else {
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head.length) socket.write(head);
+        socket.on("data", (data) => socket.write(data));
+        socket.on("end", () => socket.end());
+      }
+    });
+    const port = await listen(upstream);
+    let proxy;
+    try {
+      proxy = await startProxy({
+        bundleRoot, dataDir: dir,
+        config: { network: { mode: "manual", proxy: `http://127.0.0.1:${port}` } },
+      });
+      // More live conversations than the setup pool: none is closed for refresh.
+      for (let i = 0; i < 16; i++) {
+        const { response, socket } = await tunnelThrough(proxy.env.HTTP_PROXY, `conversation-${i}.fixture.invalid:443`);
+        held.push(socket);
+        socket.on("error", () => {});
+        assert.equal(response.statusCode, 200);
+      }
+      const ca = join(dir, "ca.pem");
+      await writeFile(ca, cert);
+      const authModule = pathToFileURL(join(bundleRoot, "app/plugin/omp-kiro/server/auth.mjs")).href;
+      const authFile = join(dir, "synthetic-auth.sqlite3");
+      assert.equal(await child(`
+        import assert from 'node:assert/strict';
+        import https from 'node:https';
+        import {saveKiroAuth, loadKiroAuth, readKiroAuth} from ${JSON.stringify(authModule)};
+        const authFile = ${JSON.stringify(authFile)};
+        const initial = {
+          kind:'oidc', provider:'identity-center', region:'ap-northeast-2',
+          client_id:'fixture-client', client_secret:'fixture-secret',
+          access_token:'expired-access', refresh_token:'original-refresh',
+          expires_at:'2020-01-01T00:00:00Z',
+          profile_arn:'arn:aws:codewhisperer:us-east-1:fixture:profile/conversation'
+        };
+        await saveKiroAuth(initial, {authFile});
+        const fetchImpl = (url, init) => new Promise((resolve,reject) => {
+          const request = https.request(url, {
+            method:init.method, headers:init.headers, signal:init.signal, servername:'localhost'
+          }, response => {
+            let body=''; response.on('data',chunk=>body+=chunk);
+            response.on('end',()=>resolve(new Response(body,{status:response.statusCode,headers:response.headers})));
+            response.on('error',reject);
+          });
+          request.on('error',reject); request.end(init.body);
+        });
+        const now = Date.now();
+        for (let i=1; i<=2; i++) {
+          const refreshed = await loadKiroAuth({
+            authFile, fetchImpl, now:()=>now+(i-1)*3601000, retry:{maxAttempts:1}
+          });
+          assert.equal(refreshed.access_token, 'refreshed-access-'+i);
+          assert.equal(refreshed.refresh_token, 'rotated-refresh-'+i);
+          assert.equal(refreshed.profile_arn, initial.profile_arn);
+          assert.deepEqual(await readKiroAuth({authFile}), refreshed);
+        }
+        console.log('same-process-refresh-rotation-persisted');
+      `, { ...proxy.env, NODE_EXTRA_CA_CERTS: ca }), "same-process-refresh-rotation-persisted");
+      assert.deepEqual(requests, ["original-refresh", "rotated-refresh-1"].map((refreshToken) => ({
+        method: "POST", path: "/token",
+        body: { clientId: "fixture-client", clientSecret: "fixture-secret", grantType: "refresh_token", refreshToken },
+      })));
+      await Promise.all(held.map(async (socket, i) => {
+        const expected = Buffer.alloc(70000 + i, i + 1);
+        const received = new Promise((resolve, reject) => {
+          const chunks = [];
+          socket.on("data", (data) => chunks.push(data));
+          socket.on("end", () => resolve(Buffer.concat(chunks)));
+          socket.on("error", reject);
+        });
+        socket.end(expected);
+        assert.deepEqual(await received, expected, "Refresh interrupted an existing conversation");
+      }));
+    } finally {
+      for (const socket of held) socket.destroy();
+      await proxy?.close();
+      for (const socket of sockets) socket.destroy();
+      await Promise.all([stop(upstream), stop(tls)]);
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows tunnel capacity rejects overflow and reuses closed slots without restarting",
+  { skip: process.platform !== "win32", timeout: 60000 },
+  async () => {
+    assert.ok(bundleRoot, "Set KIRO_TEST_BUNDLE_ROOT to the fully staged Windows bundle.");
+    const dir = await mkdtemp(join(tmpdir(), "kiro-native-capacity-"));
+    const sockets = new Set();
+    const held = [];
+    const echo = (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.on("error", () => {});
+      socket.on("data", (data) => socket.write(data));
+      socket.on("end", () => socket.end());
+    };
+    const direct = net.createServer({ allowHalfOpen: true }, echo);
+    const directPort = await listen(direct);
+    const upstream = http.createServer();
+    upstream.on("connect", (_req, socket) => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      echo(socket);
+    });
+    const port = await listen(upstream);
+    let proxy;
+    try {
+      proxy = await startProxy({
+        bundleRoot, dataDir: dir,
+        config: { network: { mode: "manual", proxy: `http://127.0.0.1:${port}` } },
+      });
+      const open = async (authority) => {
+        const result = await tunnelThrough(proxy.env.HTTP_PROXY, authority);
+        result.socket.on("error", () => {});
+        held.push(result.socket);
+        return result;
+      };
+      for (let i = 0; i < 128; i++) {
+        const authority = i % 2 ? `capacity-${i}.fixture.invalid:443` : `127.0.0.1:${directPort}`;
+        assert.equal((await open(authority)).response.statusCode, 200);
+      }
+      const overflow = await open("overflow.fixture.invalid:443");
+      assert.equal(overflow.response.statusCode, 502, "Overflow must not be admitted or queued indefinitely");
+      overflow.socket.destroy();
+      const firstClosed = new Promise((resolve) => held[0].once("close", resolve));
+      held[0].resume();
+      held[0].end();
+      await firstClosed;
+      let replacement;
+      const deadline = Date.now() + 3000;
+      do {
+        replacement = await open("replacement.fixture.invalid:443");
+        if (replacement.response.statusCode === 200) break;
+        assert.equal(replacement.response.statusCode, 502);
+        replacement.socket.destroy();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      } while (Date.now() < deadline);
+      assert.equal(replacement.response.statusCode, 200);
+      for (const socket of [held[1], held[127], replacement.socket]) {
+        const expected = Buffer.from("conversation-still-live");
+        const received = new Promise((resolve, reject) => {
+          const chunks = [];
+          socket.on("data", (data) => chunks.push(data));
+          socket.on("end", () => resolve(Buffer.concat(chunks)));
+          socket.on("error", reject);
+        });
+        socket.end(expected);
+        assert.deepEqual(await received, expected);
+      }
+    } finally {
+      for (const socket of held) socket.destroy();
+      await proxy?.close();
+      for (const socket of sockets) socket.destroy();
+      await Promise.all([stop(upstream), stop(direct)]);
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Windows native proxy serves a bounded absolute PAC file privately and tunnels strict TLS",
   { skip: process.platform !== "win32", timeout: 60000 },
   async () => {

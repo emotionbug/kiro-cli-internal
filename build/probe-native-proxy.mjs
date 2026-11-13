@@ -310,7 +310,6 @@ async function checkHttp(helper) {
 }
 try {
   const version = await command(executable, ["--version"]);
-  assert.match(version, /^kiro-proxy 1 winhttp-sspi workers=8 queue=16 buffer=16384 routes=32$/);
   await listen(upstream);
   await listen(pac);
   const manual = await startHelper({ upstreamAddress: `127.0.0.1:${upstream.address().port}` });

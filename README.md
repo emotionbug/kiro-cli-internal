@@ -6,7 +6,7 @@ Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브
 
 > 설치·기동에는 외부 다운로드가 없습니다. 로그인·목록·사용량·검색·추론에는 승인된 HTTPS 연결이 필요합니다. 완전 망 분리에서는 Kiro 클라우드를 사용할 수 없습니다. 실행 시 최신판을 내려받는 방식이 아니라, 확인한 최신 안정판을 해시로 고정합니다.
 
-## 0.6.0 구성
+## 0.6.1 구성
 
 | 구성요소 | 버전·출처 |
 |---|---|
@@ -25,7 +25,7 @@ Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브
 
 ## 실행
 
-1. 빌드된 `kiro-passession-omp-http-0.6.0-windows-x64.zip`을 **새 폴더**에 풉니다. GitHub Source code ZIP은 실행 패키지가 아닙니다.
+1. 빌드된 `kiro-passession-omp-http-0.6.1-windows-x64.zip`을 **새 폴더**에 풉니다. GitHub Source code ZIP은 실행 패키지가 아닙니다.
 2. `setup.cmd`에서 비샌드박스 플러그인 실행을 검토·승인하고 개인 데몬 비밀번호를 정합니다.
 3. 필요한 경우 `network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem` 등으로 승인된 네트워크를 설정합니다.
 4. `auth.cmd login`으로 직접 로그인하고 `models.cmd`로 계정 모델 목록을 갱신합니다.
@@ -44,6 +44,7 @@ Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브
 - upstream 인증은 현재 Windows 사용자의 SSPI Negotiate/NTLM입니다. HTTP/CONNECT·HTTP(S)/로컬 PAC를 지원하며 SOCKS·HTTPS upstream·PAC 다음 프록시로 자동 failover는 지원하지 않습니다. TLS/호스트명 검증을 해제하지 않습니다.
 - Kiro HTTP의 일시적 오류는 취소 전까지 30초 간격으로 복구하고 더 긴 `Retry-After`를 지킵니다. 선택 모델·대화 ID·완료된 도구 결과·기존 텍스트를 유지합니다. 인증·권한·인증서·할당량 오류는 무한 재시도로 숨기지 않습니다. 이미 수신된 요청의 과금이나 exactly-once를 보장하지 않습니다.
 - 네이티브 Passession 연결 복구는 해당 upstream 구현을 따릅니다. 과거 웹 UI의 고정 30초 재접속 패치를 이식했다고 주장하지 않습니다.
+- 0.6.1은 오래 유지되는 HTTPS/웹소켓 터널을 신규 연결 처리 스레드에서 분리합니다. 0.6.0의 8개 스레드 점유로 SSO 갱신 등 새 연결이 막히는 결함을 수정합니다. 터널은 128개까지 유지하며 초과 연결은 502로 거부하고 기존 연결은 보존합니다. 종료된 자리는 재시작 없이 재사용합니다. 회사망에서 보고된 특정 SSO 오류와의 인과관계는 아직 확정되지 않았습니다.
 - `web_search`는 같은 Kiro 인증으로 `/mcp`를 호출하고 출처·인용·재현 제한을 보존합니다. 반환된 사이트 본문을 자동으로 가져오거나 다른 검색 서비스로 fallback하지 않습니다. OMP의 다른 도구에 대한 네트워크 차단 기능은 아닙니다.
 
 ### 유틸리티와 이전 데이터
@@ -54,14 +55,16 @@ Python(`python`·`python3`)·rg·jq·전체 Git Bash를 런처의 자식 PATH에
 
 다른 드라이브의 `--data-dir`를 사용하면 OMP의 부가 캐시·로그·worktree는 홈의 별도 `.kiro-internal-omp\<경로 해시>`에 저장합니다. 기존 `~\.omp`는 사용하지 않습니다. 네이티브 GUI는 Windows 세션당 한 인스턴스이며 **시작 시 HKCU 알림 등록을 자신의 EXE로 갱신**하여 설치된 Paseo Sessions의 알림 활성화 대상에 영향을 줄 수 있습니다. 레지스트리 변경이 허용되지 않으면 `--no-app`과 CLI를 사용하세요.
 
+0.6.0에서 업데이트할 때는 기존 폴더의 `stop.cmd`로 종료하고 앱도 닫은 뒤, 새 폴더의 `setup.cmd`와 `start.cmd`를 사용하세요. 동일한 사용자 데이터 경로의 인증·설정·대화는 보존합니다. [0.6.1 수정 및 검증 범위](releases/0.6.1/RELEASE.md)를 참조하세요.
+
 ## 빌드와 검증
 
 인터넷이 허용된 Windows x64 MSVC Developer Command 환경에서 실행합니다. Ubuntu 사전 빌드나 `--paseo-fork` 입력은 더 이상 사용하지 않습니다.
 
 ```powershell
-node build/build-bundle.mjs --output C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 --cache C:\Build\download-cache
-node test/windows-utilities.mjs C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 C:\Build\qualification
-node test/windows-smoke.mjs C:\Build\kiro-passession-omp-http-0.6.0-windows-x64 C:\Build\qualification
+node build/build-bundle.mjs --output C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 --cache C:\Build\download-cache
+node test/windows-utilities.mjs C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 C:\Build\qualification
+node test/windows-smoke.mjs C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 C:\Build\qualification
 ```
 
 [Windows 워크플로](.github/workflows/portable-windows.yml)는 조립과 해당 ZIP의 검증을 분리합니다. 네이티브 `paseo` CLI에서 실제 OMP를 실행하여 모델 고정·파일 내용·HTTP 오류/스트림 단절 복구·도구 비반복·Kiro 검색·정밀 사용량·데몬 재시작 후 같은 대화 재개·전용 종료·패키지 무변경을 검사합니다. 별도 유틸리티 검사는 재배치된 한글 경로에서 Python SQLite → rg → jq 결과와 전체 Git Bash를 확인합니다.

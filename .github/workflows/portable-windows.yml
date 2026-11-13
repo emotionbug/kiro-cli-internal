@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  BUNDLE_NAME: kiro-passession-omp-http-0.6.0-windows-x64
+  BUNDLE_NAME: kiro-passession-omp-http-0.6.1-windows-x64
   npm_config_audit: "false"
   npm_config_fund: "false"
 

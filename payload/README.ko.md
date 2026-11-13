@@ -1,4 +1,4 @@
-# Passession + OMP + Kiro HTTP 0.6.0 — Windows x64
+# Passession + OMP + Kiro HTTP 0.6.1 — Windows x64
 
 **Passession 네이티브 앱 → OMP → Kiro HTTP → 승인된 프록시/게이트웨이 → Kiro 서비스** 구성입니다. 예전 Paseo 웹 UI와 JavaScript 데몬은 포함하지 않습니다. OMP가 파일·명령·도구 실행과 대화 기록을 담당합니다. Kiro CLI·WezTerm·Electron·별도 브라우저 엔진은 필요하지 않습니다.
 
@@ -69,6 +69,14 @@ network.cmd --mode direct
 TLS와 호스트명 검증은 유지합니다. `--ca`에는 승인된 **공개 PEM 인증서만** 지정하며 개인키를 넣지 않습니다. PAC 오류를 DIRECT로 숨기지 않습니다. 지원 범위는 HTTP upstream·HTTP/CONNECT·시스템/PAC·HTTP(S)/로컬 PAC 파일입니다. SOCKS/HTTPS upstream·다음 PAC 프록시로 자동 failover는 지원하지 않습니다. PAC 서버에 인증을 위임하지 않으므로 인증이 필요하면 승인된 로컬 PAC 파일을 사용하세요.
 
 설치·기동에는 외부 다운로드가 없지만 로그인·목록·사용량·검색·추론에는 승인된 HTTPS 연결이 필요합니다. 완전 망 분리에서는 Kiro 클라우드를 사용할 수 없습니다. 승인 검토 시작점은 `prod.us-east-1.auth.desktop.kiro.dev`, `runtime.us-east-1.kiro.dev`, `management.us-east-1.kiro.dev`이며 계정에 따라 EU Central과 지정 지역의 AWS OIDC도 사용합니다. 브라우저 로그인은 Kiro/AWS SSO/선택한 IdP의 별도 허용이 필요합니다. 이 목록은 모든 조직의 완전한 허용목록이 아닙니다.
+
+### 작업 중 SSO 통신 오류와 0.6.0 업데이트
+
+0.6.0에는 HTTPS/웹소켓의 유지 연결이 신규 연결 처리 스레드 8개를 점유할 수 있는 결함이 있습니다. 이 상태에서는 모델 통신 중 뒤늦게 필요한 SSO 토큰 갱신 연결도 대기합니다. 0.6.1은 유지 연결을 별도 I/O 루프에서 처리합니다. 동시 터널 상한은 128개이며 한도 초과는 새 연결에 502를 반환하고 기존 연결을 끊거나 무한 대기시키지 않습니다. 연결 종료 후에는 재시작 없이 자리를 재사용합니다.
+
+업데이트 시 기존 폴더에서 `stop.cmd`를 실행하고 앱도 닫은 다음, 0.6.1 ZIP을 **새 폴더**에 풉니다. 새 폴더에서 `setup.cmd`를 수행하고 `start.cmd`로 실행합니다. 같은 사용자와 데이터 경로를 유지하면 인증·설정·대화 기록을 그대로 사용합니다. 별도 `--data-dir`를 사용했다면 모든 명령에 이전과 동일한 경로를 지정하세요. 인증 DB를 삭제하거나 토큰을 다른 설치에서 복사하지 마세요.
+
+`Cannot reach AWS SSO OIDC`만으로 원인을 확정할 수는 없습니다. 업데이트 후에도 지속되면 회사망에서 `https://oidc.<SSO 리전>.amazonaws.com/token` 통신이 허용되는지 확인하세요. Identity Center 로그인에는 회사 포털 주소와 실제 SSO 리전을 함께 지정합니다. 예: `auth.cmd login --provider identity-center --start-url https://YOUR-ORGANIZATION.awsapps.com/start --region ap-northeast-2`. 인증서 검증을 끄거나 임의로 DIRECT로 우회하지 마세요.
 
 ## 도구·검색·복구
 
