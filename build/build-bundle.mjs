@@ -500,31 +500,61 @@ function assertSafeMember(member) {
   )
     throw new Error(`Unsafe archive member: ${member}`);
 }
-// Pinned 7-Zip reads archive formats Windows tar cannot (7z SFX, NSIS) without executing them.
-async function unpack(tool, archive, destination) {
-  await mkdir(destination, { recursive: true });
-  const members = (
-    await run(tool, ["l", "-slt", "-ba", "-sccUTF-8", archive], {
-      capture: true,
-      phase: `${path.basename(destination)}-list`,
-    })
-  )
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("Path = "))
-    .map((line) => line.slice("Path = ".length));
-  if (!members.length) throw new Error(`No members listed in ${path.basename(archive)}`);
-  for (const member of members) assertSafeMember(member);
-  await run(tool, ["x", "-y", "-bd", "-sccUTF-8", `-o${destination}`, archive], {
-    capture: true,
-    phase: `${path.basename(destination)}-extract`,
-  });
-  return tree(destination); // Reject every link, including links that point inside the tree.
-}
 const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-// Both Passession payloads carry upstream identity markers; they must match the pinned release.
-async function passessionIdentity(directory, installationKind) {
-  const pin = inputs.assets.passessionDaemon;
+const sameEntries = (a, b) =>
+  JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
+// Official Passession component ZIPs carry component-build-<id>.json. Its identity, executable
+// digest and requirements must equal the pin (from components-windows-x64.json), and the
+// extracted tree must be exactly its per-file SHA-256 inventory, as upstream's verify_object checks.
+async function passessionComponent(directory, pin) {
+  const { id, target, inputHash, abiVersion, requires } = pin.component;
   const relative = path.relative(output, directory).replaceAll("\\", "/");
+  const descriptorName = `component-build-${id}.json`;
+  const descriptor = JSON.parse(await readFile(path.join(directory, descriptorName), "utf8"));
+  if (
+    descriptor.schemaVersion !== 1 ||
+    descriptor.id !== id ||
+    descriptor.target !== target ||
+    !sameEntries(descriptor.identity, {
+      version: pin.version,
+      sourceSha: pin.commit,
+      inputHash,
+      abiVersion,
+    }) ||
+    descriptor.executable !== pin.executable ||
+    descriptor.executableSha256 !== pin.executableSha256 ||
+    !sameEntries(descriptor.requires, requires)
+  )
+    throw new Error(`Passession ${id} component descriptor differs from the pinned release: ${relative}`);
+  const dependencies = descriptor.dependencies ?? {};
+  if (
+    !descriptor.licenses?.length ||
+    descriptor.licenses.some((name) => !Object.hasOwn(dependencies, name))
+  )
+    throw new Error(`Passession ${id} component lacks its license inventory: ${relative}`);
+  const files = (await tree(directory)).map((file) => file.path);
+  const expected = [...Object.keys(dependencies), descriptor.executable, descriptorName].sort(ordinal);
+  if (JSON.stringify(files) !== JSON.stringify(expected))
+    throw new Error(`Passession ${id} component files differ from its descriptor: ${relative}`);
+  for (const [name, sha256] of Object.entries(dependencies))
+    if ((await digest(path.join(directory, name))) !== sha256)
+      throw new Error(`Passession ${id} component file digest mismatch: ${relative}/${name}`);
+  const sha256 = await digest(path.join(directory, pin.executable));
+  if (sha256 !== pin.executableSha256)
+    throw new Error(`Passession ${id} executable digest differs from the pin: ${relative}`);
+  return {
+    version: pin.version,
+    commit: pin.commit,
+    root: relative,
+    executable: `${relative}/${pin.executable}`,
+    sha256,
+    component: { id, target, inputHash, abiVersion },
+  };
+}
+// The daemon component also carries upstream runtime/provenance markers for the pinned release.
+async function passessionDaemonIdentity(directory) {
+  const pin = inputs.assets.passessionDaemon;
+  const identity = await passessionComponent(directory, pin);
   const runtime = JSON.parse(await readFile(path.join(directory, "paseo-runtime.json"), "utf8"));
   const provenance = JSON.parse(
     await readFile(path.join(directory, "bundle-provenance.json"), "utf8"),
@@ -533,27 +563,26 @@ async function passessionIdentity(directory, installationKind) {
     if (
       marker.version !== pin.version ||
       marker.sourceSha !== pin.commit ||
-      marker.installationKind !== installationKind ||
+      marker.installationKind !== "standalone-archive" ||
       marker.platform !== "windows" ||
       marker.arch !== "x64" ||
       marker.runtime !== "rust" ||
       marker.release !== true
     )
-      throw new Error(`Passession identity marker differs from the pinned release: ${relative}`);
+      throw new Error(`Passession identity marker differs from the pinned release: ${identity.root}`);
   }
-  if (provenance.repository !== "emotionbug/Passession" || provenance.sourceDirty !== false)
-    throw new Error(`Passession provenance is not the official clean release: ${relative}`);
-  const sha256 = await digest(path.join(directory, "paseo.exe"));
-  if (sha256 !== provenance.executableSha256 || sha256 !== pin.executableSha256)
-    throw new Error(`Passession executable digest differs from provenance/pin: ${relative}`);
-  return {
-    version: pin.version,
-    commit: pin.commit,
-    root: relative,
-    executable: `${relative}/paseo.exe`,
-    sha256,
-    installationKind,
-  };
+  if (
+    provenance.repository !== "emotionbug/Passession" ||
+    provenance.sourceDirty !== false ||
+    provenance.executableSha256 !== identity.sha256
+  )
+    throw new Error(`Passession provenance is not the official clean release: ${identity.root}`);
+  const descriptor = JSON.parse(
+    await readFile(path.join(directory, "desktop-runtime.json"), "utf8"),
+  );
+  if (descriptor.executable !== pin.executable || descriptor.cliShimPath !== pin.executable)
+    throw new Error(`Desktop runtime descriptor does not name the daemon: ${identity.root}`);
+  return { ...identity, installationKind: "standalone-archive" };
 }
 // Static ESM import closure from package entries. Relative modules must exist inside the package;
 // bare specifiers must be host-provided (Node/Bun builtins, OMP's @oh-my-pi/pi-ai). Fail closed.
@@ -721,49 +750,21 @@ try {
     scope:
       "Direct imports only; source API review and actual Server 2019 execution remain distinct requirements",
   };
-  checkpoint("seven-zip");
-  // Build-host tool only: 7zr.exe reads the official 7-Zip 7z archive, whose full 7z.exe/7z.dll
-  // then read the NSIS desktop installer. No installer is executed and 7-Zip is not shipped.
-  const sevenZipRoot = path.join(work, "7-zip");
-  const sevenZipFiles = (await unpack(acquired.sevenZipBootstrap, acquired.sevenZip, sevenZipRoot))
-    .map((file) => file.path);
-  for (const required of ["7z.exe", "7z.dll"])
-    if (!sevenZipFiles.includes(required)) throw new Error(`Pinned 7-Zip lacks ${required}`);
-  const sevenZip = path.join(sevenZipRoot, "7z.exe");
   checkpoint("passession-daemon");
   const passessionRoot = path.join(output, "runtime/passession");
   await extract(acquired.passessionDaemon, passessionRoot);
-  const passessionDaemon = await passessionIdentity(passessionRoot, "standalone-archive");
+  const passessionDaemon = await passessionDaemonIdentity(passessionRoot);
   checkpoint("passession-app");
-  const installer = path.join(work, "passession-app-installer");
-  const installerFiles = (await unpack(sevenZip, acquired.passessionApp, installer))
-    .map((file) => file.path)
-    .filter((name) => !name.startsWith("$PLUGINSDIR/")); // NSIS installer UI plugins
-  const inventoryName = ".paseo-sessions-owned-files";
-  // The installer's own inventory is the authority for its payload; any drift fails the build.
-  const owned = (await readFile(path.join(installer, inventoryName), "utf8"))
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((name) => name.replaceAll("\\", "/"))
-    .sort(ordinal);
-  if (JSON.stringify(owned) !== JSON.stringify([...installerFiles].sort(ordinal)))
-    throw new Error("Desktop installer payload differs from its owned-file inventory");
-  const installerOnly = ["Uninstall.exe", inventoryName];
+  // Upstream's Windows package roots: app component at ".", daemon component at "runtime".
+  // components.json and the tailnet/update-helper components are not shipped, so the client
+  // runs without a component inventory and starts its daemon from runtime/desktop-runtime.json.
   const passessionAppRoot = path.join(output, "runtime/passession-app");
-  await copyTree(
-    installer,
-    passessionAppRoot,
-    (name) => !installerOnly.includes(name) && owned.includes(name),
-  );
-  const passessionAppDaemon = await passessionIdentity(
+  await extract(acquired.passessionApp, passessionAppRoot);
+  const passessionApp = await passessionComponent(passessionAppRoot, inputs.assets.passessionApp);
+  await extract(acquired.passessionDaemon, path.join(passessionAppRoot, "runtime"));
+  const passessionAppDaemon = await passessionDaemonIdentity(
     path.join(passessionAppRoot, "runtime"),
-    "desktop-bundled",
   );
-  const desktopDescriptor = JSON.parse(
-    await readFile(path.join(passessionAppRoot, "runtime/desktop-runtime.json"), "utf8"),
-  );
-  if (desktopDescriptor.executable !== "paseo.exe")
-    throw new Error("Desktop runtime descriptor does not name its bundled daemon");
   checkpoint("omp");
   const ompExecutable = path.join(output, "runtime/omp/omp.exe");
   await mkdir(path.dirname(ompExecutable), { recursive: true });
@@ -836,16 +837,14 @@ try {
     throw new Error("Plugin source version does not match pin");
   if (JSON.stringify(published.omp?.extensions) !== JSON.stringify(["./index.js"]))
     throw new Error("Plugin OMP extension entry changed");
-  // Passession 0.13.15 loads only native Rust plugins, so omp-kiro's JavaScript Paseo provider
-  // (index.server.ts, server/provider|tools|mcp|usage-source.mjs) cannot load and is not shipped.
-  // Ship the exact static module closure of the OMP extension and the auth CLI.
+  // Passession loads native plugins; omp-kiro 0.5 ships no JS Paseo provider.
+  // Ship the static module closure of the OMP extension and the auth CLI.
   const pluginClosure = await moduleClosure(source, ["index.js", "auth-cli.mjs"]);
   const pluginShipped = (name) =>
-    pluginClosure.files.has(name) || /^(?:docs\/|LICENSE$|README\.md$|icon\.svg$)/.test(name);
+    pluginClosure.files.has(name) || /^(?:docs\/|LICENSE$|README\.md$)/.test(name);
   await copyTree(source, plugin, pluginShipped);
   const {
     scripts,
-    dependencies: pluginDependencies,
     devDependencies,
     files: publishedFiles,
     ...productionManifest
@@ -860,8 +859,8 @@ try {
       .map((file) => file.path)
       .filter((name) => !pluginShipped(name)),
     modifications: [
-      "Only the static module closure of the OMP extension (index.js) and auth CLI (auth-cli.mjs), with docs, README, LICENSE and icon, is shipped; the JavaScript Paseo provider files are omitted because Passession loads only native plugins",
-      "package.json: removed scripts, devDependencies, the publish file list and npm dependencies (@modelcontextprotocol/sdk, ajv), which only the omitted Paseo provider imports; @oh-my-pi/pi-ai remains a host-supplied optional peer",
+      "Only the static module closure of the OMP extension (index.js) and auth CLI (auth-cli.mjs), with docs, README and LICENSE, is shipped; setup.mjs, tests and development files are omitted",
+      "package.json: removed scripts, devDependencies and the publish file list; @oh-my-pi/pi-ai remains a host-supplied optional peer",
     ],
     originalPackageManifest: published,
   });
@@ -997,7 +996,7 @@ try {
   const daemonPin = inputs.assets.passessionDaemon;
   await writeFile(
     path.join(licenses, "SOURCE-AVAILABILITY.txt"),
-    `Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources/${gitSourceName}. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nPassession ${daemonPin.version} (Apache-2.0) native daemon and desktop client are the unmodified official release binaries of ${daemonPin.repository} at ${daemonPin.commit}; source is available at ${daemonPin.repository}/tree/${daemonPin.commit}. runtime/passession is the complete daemon release ZIP. runtime/passession-app is the complete payload of the official NSIS installer as listed by its own owned-file inventory, unpacked with 7-Zip without running the installer; the installer-generated Uninstall.exe and the inventory file are omitted. Their LICENSE, THIRD-PARTY-NOTICES, Rust third-party notices and font licenses remain in place.\nOMP ${inputs.assets.omp.version} is the unmodified official standalone executable from ${inputs.assets.omp.repository} (MIT, LICENSES/OMP-LICENSE.txt); it embeds its own JavaScript runtime.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every installed package; NPM-PACKAGES.json records exact public registry integrity pins. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license; app/plugin/omp-kiro/BUNDLE-PROJECTION.json records the shipped module closure and manifest changes.\n`,
+    `Git for Windows is redistributed as its complete, unmodified PortableGit distribution; licenses and third-party notices remain under runtime/git. The upstream Git source package is included in LICENSES/sources/${gitSourceName}. Additional bundled MSYS2 component sources/build recipes are available from https://gitforwindows.org/third-party.html and https://github.com/git-for-windows/MSYS2-packages and https://github.com/git-for-windows/MINGW-packages . Preserve these notices when redistributing.\nPassession ${daemonPin.version} (Apache-2.0) native daemon and desktop client are the unmodified official release component binaries of ${daemonPin.repository} at ${daemonPin.commit} (release ${daemonPin.releaseTag}); source is available at ${daemonPin.repository}/tree/${daemonPin.commit}. runtime/passession is the complete daemon component ZIP. runtime/passession-app is the complete app component ZIP with the complete daemon component ZIP at runtime/, the upstream Windows package roots; each tree matches its component-build-*.json file inventory. The tailnet and update-helper components and the components.json inventory are not shipped. Their LICENSE, THIRD-PARTY-NOTICES, Rust third-party notices and font licenses remain in place.\nOMP ${inputs.assets.omp.version} is the unmodified official standalone executable from ${inputs.assets.omp.repository} (MIT, LICENSES/OMP-LICENSE.txt); it embeds its own JavaScript runtime.\nNode.js LICENSE contains its third-party notices. npm package licenses remain with every installed package; NPM-PACKAGES.json records exact public registry integrity pins. The native WinHTTP/SSPI helper source and build/import provenance are included. The Kiro HTTP plugin retains its upstream Apache-2.0 license; app/plugin/omp-kiro/BUNDLE-PROJECTION.json records the shipped module closure and manifest changes.\n`,
   );
   await copyFile(nativeSource, path.join(licenses, "sources/kiro-proxy.cpp"));
   await json(path.join(licenses, "NATIVE-PROXY-BUILD.json"), {
@@ -1078,17 +1077,15 @@ try {
     native: {
       passessionDaemon,
       passessionApp: {
-        version: inputs.assets.passessionApp.version,
-        commit: inputs.assets.passessionApp.commit,
-        root: "runtime/passession-app",
-        executable: "runtime/passession-app/paseo_sessions.exe",
-        sha256: await digest(path.join(passessionAppRoot, "paseo_sessions.exe")),
+        ...passessionApp,
+        archiveSha256: inputs.assets.passessionApp.sha256,
         bundledDaemon: passessionAppDaemon.executable,
         bundledDaemonSha256: passessionAppDaemon.sha256,
         descriptor: "runtime/passession-app/runtime/desktop-runtime.json",
-        installerSha256: inputs.assets.passessionApp.sha256,
-        unpackedBy: `7-Zip ${inputs.assets.sevenZip.version} (build host only; installer not executed)`,
-        excludedInstallerMembers: [...installerOnly, "$PLUGINSDIR/*"],
+        componentRoots: { app: ".", daemon: "runtime" },
+        omittedComponents: ["tailnet", "update-helper"],
+        componentInventory:
+          "Not shipped: without components.json the client runs in its non-component mode (daemon from runtime/desktop-runtime.json, no in-app updates, embedded Tailscale unavailable)",
       },
       omp: {
         version: inputs.assets.omp.version,

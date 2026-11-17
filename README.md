@@ -6,26 +6,26 @@ Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브
 
 > 설치·기동에는 외부 다운로드가 없습니다. 로그인·목록·사용량·검색·추론에는 승인된 HTTPS 연결이 필요합니다. 완전 망 분리에서는 Kiro 클라우드를 사용할 수 없습니다. 실행 시 최신판을 내려받는 방식이 아니라, 확인한 최신 안정판을 해시로 고정합니다.
 
-## 0.6.1 구성
+## 0.6.2 구성
 
 | 구성요소 | 버전·출처 |
 |---|---|
-| Passession 네이티브 앱·데몬 | [0.13.15](https://github.com/emotionbug/Passession/releases/tag/v0.13.15), `428a5f68f5683d9a63a90d506909568e60093e6b` |
-| OMP standalone | [18.20.0](https://github.com/can1357/oh-my-pi/releases/tag/v18.20.0) |
-| `omp-kiro` HTTP 플러그인 | 0.4.8, [`8056e05`](https://github.com/emotionbug/omp-kiro/commit/8056e05380e545afed6a093a1e6e550b4a59fd0d) |
+| Passession 네이티브 앱·데몬 | [0.13.35](https://github.com/emotionbug/Passession/releases/tag/v0.13.35), `43ff7d59a0390427958ac62a97d77cae4e5237aa` |
+| OMP standalone | [18.22.0](https://github.com/can1357/oh-my-pi/releases/tag/v18.22.0) |
+| `omp-kiro` HTTP 플러그인 | 0.5.2, [`e2dba938`](https://github.com/emotionbug/omp-kiro/commit/e2dba938acd89c60e5d3f2e269c9047a5a038ddf) |
 | Node.js LTS | 26.13.1 |
 | Python 표준 라이브러리 | 3.15.2 |
 | ripgrep / jq | 15.2.0 / 1.8.2 |
 | 전체 Git for Windows·Git Bash | 2.56.1.windows.1 |
 | 프록시 | 저장소 C++ 소스로 빌드하는 WinHTTP·SSPI helper |
 
-입력 URL·SHA-256은 `build/inputs.json`, npm 의존성은 `payload/app/package-lock.json`, 출력 파일별 해시는 ZIP의 `bundle-manifest.json`에 있습니다. 데스크톱 공식 NSIS 배포물에서 필요한 네이티브 실행 파일·런타임·리소스·고지를 추출하고 설치기/제거기는 배포하지 않습니다. 7-Zip은 빌드 도구이며 사용자 패키지에 넣지 않습니다. Passession의 `flutter-*.json` 피드 이름은 호환성 식별자이지 현재 UI 기술이 아닙니다.
+입력 URL·SHA-256은 `build/inputs.json`, npm 의존성은 `payload/app/package-lock.json`, 출력 파일별 해시는 ZIP의 `bundle-manifest.json`에 있습니다. 공식 Passession app·daemon component ZIP의 파일별 해시·ABI·소스 식별자를 검증하여 필요한 실행 파일·런타임·리소스·고지를 포함합니다. 설치기를 실행하거나 별도 7-Zip을 사용하지 않습니다. 실행 중 버전이 바뀌지 않도록 in-app update와 내장 Tailscale 구성요소는 포함하지 않습니다.
 
 `app/omp-network-policy.json`은 같은 OMP 버전의 정적 카탈로그와 동적 제공자 레지스트리에서 생성합니다. Kiro 외 기본 제공자의 자동 모델 탐색과 OMP 시작 시 업데이트 확인·자동 업데이트·marketplace 갱신을 끕니다. 불필요한 외부 조회를 숨기거나 프록시 허용목록을 넓히는 대신 조회 원인을 비활성화합니다. 사용자가 실행하는 Git·MCP·네트워크 도구를 막는 방화벽은 아닙니다.
 
 ## 실행
 
-1. 빌드된 `kiro-passession-omp-http-0.6.1-windows-x64.zip`을 **새 폴더**에 풉니다. GitHub Source code ZIP은 실행 패키지가 아닙니다.
+1. 빌드된 `kiro-passession-omp-http-0.6.2-windows-x64.zip`을 **새 폴더**에 풉니다. GitHub Source code ZIP은 실행 패키지가 아닙니다.
 2. `setup.cmd`에서 비샌드박스 플러그인 실행을 검토·승인하고 개인 데몬 비밀번호를 정합니다.
 3. 필요한 경우 `network.cmd --mode system --ca C:\ApprovedConfig\company-root.pem` 등으로 승인된 네트워크를 설정합니다.
 4. `auth.cmd login`으로 직접 로그인하고 `models.cmd`로 계정 모델 목록을 갱신합니다.
@@ -37,6 +37,8 @@ Windows x64용 오프라인 설치 패키지입니다. **Passession 네이티브
 전용 데몬은 기본 `127.0.0.1:16767`만 사용합니다. 웹 UI 주소가 아니며 공개 인터페이스로 노출하지 않습니다. 모든 명령에 동일한 `--data-dir 절대경로`를 지정하여 기본 `%LOCALAPPDATA%\KiroInternal` 대신 별도 사용자 데이터를 사용할 수 있습니다. 원래 HOME/USERPROFILE·Git/SSH 설정은 유지하고 시스템 PATH·프록시·인증서 저장소는 변경하지 않습니다.
 
 **상세 실행·인증·Identity Center 프로필·프록시·모드·유틸리티 설명은 [동봉 사용자 안내](payload/README.ko.md)**에 있습니다. 개인정보 취급 범위는 [PRIVACY.md](PRIVACY.md)를 참조하세요.
+
+`omp-kiro`는 별도 태그·릴리스가 없어 확인 시점 main의 0.5.2 소스를 커밋 해시로 고정했습니다. `auth.cmd profiles --usage`로 프로필과 사용량을 조회하고, `auth.cmd profile --profile "ARN 또는 고유 이름"`으로 선택합니다. OMP 내부 `/kiro-profile`로 바꾼 뒤에는 `models.cmd`로 Passession의 모델 목록도 갱신하세요.
 
 ### 프록시와 재시도
 
@@ -55,16 +57,16 @@ Python(`python`·`python3`)·rg·jq·전체 Git Bash를 런처의 자식 PATH에
 
 다른 드라이브의 `--data-dir`를 사용하면 OMP의 부가 캐시·로그·worktree는 홈의 별도 `.kiro-internal-omp\<경로 해시>`에 저장합니다. 기존 `~\.omp`는 사용하지 않습니다. 네이티브 GUI는 Windows 세션당 한 인스턴스이며 **시작 시 HKCU 알림 등록을 자신의 EXE로 갱신**하여 설치된 Paseo Sessions의 알림 활성화 대상에 영향을 줄 수 있습니다. 레지스트리 변경이 허용되지 않으면 `--no-app`과 CLI를 사용하세요.
 
-0.6.0에서 업데이트할 때는 기존 폴더의 `stop.cmd`로 종료하고 앱도 닫은 뒤, 새 폴더의 `setup.cmd`와 `start.cmd`를 사용하세요. 동일한 사용자 데이터 경로의 인증·설정·대화는 보존합니다. [0.6.1 수정 및 검증 범위](releases/0.6.1/RELEASE.md)를 참조하세요.
+0.6.0/0.6.1에서 업데이트할 때는 기존 폴더의 `stop.cmd`로 종료하고 앱도 닫은 뒤, 새 폴더의 `setup.cmd`와 `start.cmd`를 사용하세요. 동일한 사용자 데이터 경로의 인증·설정·대화는 보존합니다. 플러그인 커밋이 달라져 코드 신뢰 승인은 다시 필요하며 `models.cmd`로 최신 모델 메타데이터를 갱신하세요. [0.6.2 변경사항과 검증 범위](releases/0.6.2/RELEASE.md)를 참조하세요.
 
 ## 빌드와 검증
 
 인터넷이 허용된 Windows x64 MSVC Developer Command 환경에서 실행합니다. Ubuntu 사전 빌드나 `--paseo-fork` 입력은 더 이상 사용하지 않습니다.
 
 ```powershell
-node build/build-bundle.mjs --output C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 --cache C:\Build\download-cache
-node test/windows-utilities.mjs C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 C:\Build\qualification
-node test/windows-smoke.mjs C:\Build\kiro-passession-omp-http-0.6.1-windows-x64 C:\Build\qualification
+node build/build-bundle.mjs --output C:\Build\kiro-passession-omp-http-0.6.2-windows-x64 --cache C:\Build\download-cache
+node test/windows-utilities.mjs C:\Build\kiro-passession-omp-http-0.6.2-windows-x64 C:\Build\qualification
+node test/windows-smoke.mjs C:\Build\kiro-passession-omp-http-0.6.2-windows-x64 C:\Build\qualification
 ```
 
 [Windows 워크플로](.github/workflows/portable-windows.yml)는 조립과 해당 ZIP의 검증을 분리합니다. 네이티브 `paseo` CLI에서 실제 OMP를 실행하여 모델 고정·파일 내용·HTTP 오류/스트림 단절 복구·도구 비반복·Kiro 검색·정밀 사용량·데몬 재시작 후 같은 대화 재개·전용 종료·패키지 무변경을 검사합니다. 별도 유틸리티 검사는 재배치된 한글 경로에서 Python SQLite → rg → jq 결과와 전체 Git Bash를 확인합니다.

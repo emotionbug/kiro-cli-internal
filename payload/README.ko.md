@@ -1,4 +1,4 @@
-# Passession + OMP + Kiro HTTP 0.6.1 — Windows x64
+# Passession + OMP + Kiro HTTP 0.6.2 — Windows x64
 
 **Passession 네이티브 앱 → OMP → Kiro HTTP → 승인된 프록시/게이트웨이 → Kiro 서비스** 구성입니다. 예전 Paseo 웹 UI와 JavaScript 데몬은 포함하지 않습니다. OMP가 파일·명령·도구 실행과 대화 기록을 담당합니다. Kiro CLI·WezTerm·Electron·별도 브라우저 엔진은 필요하지 않습니다.
 
@@ -6,22 +6,22 @@
 
 | 구성요소 | 고정 버전 |
 |---|---|
-| Passession 앱·Rust 데몬/CLI | 0.13.15 (`428a5f68f5683d9a63a90d506909568e60093e6b`) |
-| OMP | 18.20.0 |
-| Kiro HTTP 플러그인 (`omp-kiro`) | 0.4.8 (`8056e05380e545afed6a093a1e6e550b4a59fd0d`) |
+| Passession 앱·Rust 데몬/CLI | 0.13.35 (`43ff7d59a0390427958ac62a97d77cae4e5237aa`) |
+| OMP | 18.22.0 |
+| Kiro HTTP 플러그인 (`omp-kiro`) | 0.5.2 (`e2dba938acd89c60e5d3f2e269c9047a5a038ddf`) |
 | Node.js | 26.13.1 LTS |
 | Python 표준 라이브러리 | 3.15.2 |
 | ripgrep / jq | 15.2.0 / 1.8.2 |
 | 전체 Git for Windows·Git Bash | 2.56.1.windows.1 |
 | 프록시 | 이 저장소의 WinHTTP·SSPI 네이티브 helper |
 
-조회 시점의 최신 안정판을 고정하며 실행 시 자동으로 다른 버전을 다운로드하지 않습니다. 입력 출처·SHA-256·전체 파일 목록은 `bundle-manifest.json`, 라이선스는 `LICENSES/` 및 각 구성요소에 있습니다. Passession의 과거 `flutter-*.json` 업데이트 피드 이름은 호환성 식별자이며 이 앱은 Rust 네이티브 앱입니다.
+조회 시점의 최신 안정판을 고정하며 실행 시 자동으로 다른 버전을 다운로드하지 않습니다. omp-kiro는 별도 태그·릴리스가 없어 확인 시점 main의 0.5.2 소스를 커밋 해시로 고정했습니다. 입력 출처·SHA-256·전체 파일 목록은 `bundle-manifest.json`, 라이선스는 `LICENSES/` 및 각 구성요소에 있습니다. 공식 app·daemon component ZIP을 사용하며 in-app update 및 내장 Tailscale은 포함하지 않습니다.
 
 OMP에는 `app/omp-network-policy.json`을 적용합니다. 같은 OMP 버전의 공식 정적 카탈로그·동적 제공자 레지스트리에서 기본 제공자 전체를 비활성화하여 Kiro 이외의 모델 목록을 자동 조회하지 않습니다. OMP 시작 시 업데이트 확인·자동 업데이트·marketplace 자동 갱신도 끕니다. 사용자가 직접 실행한 네트워크 도구를 차단하는 방화벽은 아닙니다.
 
 ## 처음 사용
 
-1. ZIP 전체를 **새 폴더**에 풉니다. 이전 0.4/0.5 설치 위에 덮어쓰지 마세요. GitHub Source code ZIP은 실행 패키지가 아닙니다.
+1. ZIP 전체를 **새 폴더**에 풉니다. 이전 설치 위에 덮어쓰지 마세요. GitHub Source code ZIP은 실행 패키지가 아닙니다.
 2. `setup.cmd`로 동봉 OMP 플러그인의 비샌드박스 실행을 검토·승인하고 개인 데몬 비밀번호를 정합니다.
 3. 회사망에서는 아래 `network.cmd`로 승인된 Windows 시스템/PAC 또는 수동 프록시를 설정합니다.
 4. `auth.cmd login`을 실행합니다. 출력된 공식 device 인증 링크를 승인된 브라우저/기기에서 열어 직접 승인합니다.
@@ -36,8 +36,9 @@ OMP에는 `app/omp-network-policy.json`을 적용합니다. 같은 OMP 버전의
 auth.cmd login --provider google
 auth.cmd login --provider github
 auth.cmd login --provider builder-id
-auth.cmd login --provider identity-center --start-url https://YOUR-ORGANIZATION.awsapps.com/start
+auth.cmd login --provider identity-center --start-url https://YOUR-ORGANIZATION.awsapps.com/start --region YOUR-SSO-REGION
 auth.cmd status
+auth.cmd profiles --usage
 auth.cmd profile
 models.cmd
 usage.cmd
@@ -47,7 +48,9 @@ omp.cmd --model kiro-http/auto
 
 `auto`를 포함한 모델은 실제 계정 목록에 있는 경우에만 사용할 수 있습니다. **Passession의 OMP 제공자와 OMP CLI 모두 `kiro-http/<실제 모델 ID>`를 사용합니다.** `models.cmd`의 계정 스냅샷에는 원본 ID가 저장됩니다. 빈 목록·인증 오류를 임의 모델이나 다른 전송 방식으로 대체하지 않습니다. 로그인 계정이나 Kiro 프로필을 바꾸면 목록을 다시 갱신하세요.
 
-Identity Center 계정의 프로필이 여러 개면 임의로 하나를 선택하지 않습니다. `auth.cmd profile --profile 실제_프로필_ARN`으로 선택합니다. 인증서·권한·계정 사용량 오류는 무한 재시도로 감추지 않습니다. `usage.cmd`는 계정 할당량이며 세션별 토큰 사용량이 아닙니다. 예전 JavaScript Paseo 플러그인의 사용량 패널을 네이티브 앱으로 이식했다고 주장하지 않습니다.
+모델이 추론 수준을 지원하면 Passession의 모델 설정에 계정 메타데이터가 허용하는 Auto·Off·Low·Medium·High 등의 선택지가 표시됩니다. 추론이 필수인 모델에는 Off를 제공하지 않습니다. `models.cmd` 갱신 시 여전히 지원되는 기존 기본 선택은 보존하고, 더 이상 지원하지 않는 선택은 모델 기본값으로 바꿉니다.
+
+Identity Center 계정의 프로필이 여러 개면 임의로 하나를 선택하지 않습니다. `auth.cmd profiles` 또는 `auth.cmd profiles --usage`로 목록을 확인하고 `auth.cmd profile --profile "실제_프로필_ARN_또는_고유한_이름"`으로 선택합니다. `auth.cmd profile`만 실행하면 현재 선택을 조회합니다. OMP에서도 `/kiro-profiles`, `/kiro-profile`로 조회·변경할 수 있으며 변경 후에는 `models.cmd`로 Passession 모델 목록을 갱신하세요. 인증서·권한·계정 사용량 오류는 무한 재시도로 감추지 않습니다. `usage.cmd`는 계정 할당량이며 세션별 토큰 사용량이 아닙니다.
 
 기존 CLI social 인증은 `auth.cmd import-cli`로 명시적으로 가져올 수 있습니다. 원본 기본 위치는 원래 사용자 홈의 `.local\share\kiro-cli\data.sqlite3`이며 `--database 절대경로`로 변경할 수 있습니다. 원본 DB는 수정하지 않지만 복사한 refresh token의 회전·폐기는 원래 로그인과 공유될 수 있어 독립적인 `auth.cmd login`을 권장합니다.
 
@@ -74,7 +77,7 @@ TLS와 호스트명 검증은 유지합니다. `--ca`에는 승인된 **공개 P
 
 0.6.0에는 HTTPS/웹소켓의 유지 연결이 신규 연결 처리 스레드 8개를 점유할 수 있는 결함이 있습니다. 이 상태에서는 모델 통신 중 뒤늦게 필요한 SSO 토큰 갱신 연결도 대기합니다. 0.6.1은 유지 연결을 별도 I/O 루프에서 처리합니다. 동시 터널 상한은 128개이며 한도 초과는 새 연결에 502를 반환하고 기존 연결을 끊거나 무한 대기시키지 않습니다. 연결 종료 후에는 재시작 없이 자리를 재사용합니다.
 
-업데이트 시 기존 폴더에서 `stop.cmd`를 실행하고 앱도 닫은 다음, 0.6.1 ZIP을 **새 폴더**에 풉니다. 새 폴더에서 `setup.cmd`를 수행하고 `start.cmd`로 실행합니다. 같은 사용자와 데이터 경로를 유지하면 인증·설정·대화 기록을 그대로 사용합니다. 별도 `--data-dir`를 사용했다면 모든 명령에 이전과 동일한 경로를 지정하세요. 인증 DB를 삭제하거나 토큰을 다른 설치에서 복사하지 마세요.
+업데이트 시 기존 폴더에서 `stop.cmd`를 실행하고 앱도 닫은 다음, 새 ZIP을 **새 폴더**에 풉니다. 새 폴더에서 `setup.cmd`로 변경된 플러그인 코드를 다시 검토·승인하고 `models.cmd`로 메타데이터를 갱신한 뒤 `start.cmd`로 실행합니다. 같은 사용자와 데이터 경로를 유지하면 인증·설정·대화 기록을 그대로 사용합니다. 별도 `--data-dir`를 사용했다면 모든 명령에 이전과 동일한 경로를 지정하세요. 인증 DB를 삭제하거나 토큰을 다른 설치에서 복사하지 마세요.
 
 `Cannot reach AWS SSO OIDC`만으로 원인을 확정할 수는 없습니다. 업데이트 후에도 지속되면 회사망에서 `https://oidc.<SSO 리전>.amazonaws.com/token` 통신이 허용되는지 확인하세요. Identity Center 로그인에는 회사 포털 주소와 실제 SSO 리전을 함께 지정합니다. 예: `auth.cmd login --provider identity-center --start-url https://YOUR-ORGANIZATION.awsapps.com/start --region ap-northeast-2`. 인증서 검증을 끄거나 임의로 DIRECT로 우회하지 마세요.
 

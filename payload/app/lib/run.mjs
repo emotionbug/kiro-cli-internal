@@ -36,7 +36,8 @@ start.cmd                 Start the isolated loopback Passession daemon and its 
 app.cmd                   Open the Passession desktop app for this running private daemon
 setup.cmd                 Set private state, extension consent and daemon password
 auth.cmd login [options]  Managed Google/GitHub/Builder ID/Identity Center login
-auth.cmd profile [--profile ARN]  Resolve or select the Kiro profile of this login
+auth.cmd profile [--profile ARN|NAME]  Show, or select, this login's Kiro profile
+auth.cmd profiles [--usage]  List this login's Kiro profiles; --usage compares quotas
 auth.cmd status|logout    Local status/logout, no network required
 models.cmd                Refresh account model metadata and this daemon's catalog
 usage.cmd                 Read account quota (not a model generation)
@@ -322,13 +323,21 @@ export function authOperation(args) {
       timeout: { type: "string" },
       database: { type: "string" },
       json: { type: "boolean" },
+      usage: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
   if (values.help || !positionals.length) return "help";
   const operation = positionals.join(" ");
   if (
-    !["login", "auth status", "auth logout", "auth import-cli", "auth profile"].includes(operation)
+    ![
+      "login",
+      "auth status",
+      "auth logout",
+      "auth import-cli",
+      "auth profile",
+      "auth profiles",
+    ].includes(operation)
   )
     throw new Error("Unknown authentication command; use auth.cmd --help.");
   return operation;
@@ -790,7 +799,7 @@ export async function main(argv = process.argv.slice(2)) {
       throw new Error(
         "Use --data-dir to choose the private authentication store; --auth-file cannot split runtime stores.",
       );
-    let args = ["status", "logout", "import-cli", "profile"].includes(rest[0])
+    let args = ["status", "logout", "import-cli", "profile", "profiles"].includes(rest[0])
       ? ["auth", ...rest]
       : rest;
     const operation = authOperation(args);
@@ -799,12 +808,17 @@ export async function main(argv = process.argv.slice(2)) {
       !args.some((value) => value === "--database" || value.startsWith("--database="))
     )
       args = [...args, "--database", path.join(homedir(), ".local/share/kiro-cli/data.sqlite3")];
-    const changesAccount = ["login", "auth import-cli", "auth logout", "auth profile"];
+    // Without --profile, auth profile only reports the saved selection; auth
+    // profiles lists or compares profiles without choosing one.
+    const changesAccount =
+      ["login", "auth import-cli", "auth logout"].includes(operation) ||
+      (operation === "auth profile" &&
+        args.some((value) => value === "--profile" || value.startsWith("--profile=")));
     const perform = async (env) => {
       const code = await child(node, [path.join(pluginRoot, "auth-cli.mjs"), ...args], env, {
         relaySignals: true,
       });
-      if (code || !changesAccount.includes(operation)) return code;
+      if (code || !changesAccount) return code;
       // Credentials or profile changed successfully. Invalidate the previous
       // account's metadata before any refresh; a failed request cannot leave it trusted.
       try {

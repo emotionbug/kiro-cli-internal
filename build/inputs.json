@@ -4,61 +4,82 @@
   "target": "win32-x64",
   "assets": {
     "passessionDaemon": {
-      "version": "0.13.15",
+      "version": "0.13.35",
       "repository": "https://github.com/emotionbug/Passession",
-      "commit": "428a5f68f5683d9a63a90d506909568e60093e6b",
-      "url": "https://github.com/emotionbug/Passession/releases/download/v0.13.15/Paseo-Daemon-0.13.15-windows-x64.zip",
-      "sha256": "9b7f99af6e38b7475c95f4c4d142405358465785a7c1bb78402bcd198b1fb5e7",
-      "executableSha256": "7808a5e2c1f79c1c18a080dda043e7b71c27f86b5db442e7237cdbabfea9568e",
-      "checksumSource": "https://github.com/emotionbug/Passession/releases/download/v0.13.15/provenance-windows-x64.json and GitHub release asset digest",
-      "license": "Apache-2.0; LICENSE, THIRD-PARTY-NOTICES.txt and RUST-THIRD-PARTY-NOTICES.* retained in runtime/passession",
-      "purpose": "Native Rust Passession daemon and paseo CLI, unmodified standalone release archive"
+      "commit": "43ff7d59a0390427958ac62a97d77cae4e5237aa",
+      "releaseTag": "v0.13.35",
+      "url": "https://github.com/emotionbug/Passession/releases/download/v0.13.35/Paseo-Component-daemon-0.13.35-windows-x64.zip",
+      "sha256": "2a8e7caad73da7429d702ccbf9044cff8190bc3febf18c02b71f561c2b059a88",
+      "size": 35702981,
+      "component": {
+        "id": "daemon",
+        "target": "windows-x64",
+        "inputHash": "c583b9131591322dcbc81ef9f46858570c03fe95745a333b1e3a1b4a78f0d3bd",
+        "abiVersion": 1,
+        "requires": {}
+      },
+      "executable": "paseo.exe",
+      "executableSha256": "15e8de504af8161ee11e7c8b9eb6a61d613e802f1db77c9d1f850088da78151f",
+      "checksumSource": "https://github.com/emotionbug/Passession/releases/download/v0.13.35/components-windows-x64.json (sha256 cbfbce8ffd0d4d39d89fd57bb383616e8c3da53a6f02f27c040df4c1c7eff20f) and provenance-windows-x64.json (sha256 e1b269a1f0c46b27f15d3c0d72f3f5f4759e6f9cde4d13663139065b79c0f226; .github/workflows/desktop-release.yml run 44011973715), both matching their GitHub release asset digests, plus this ZIP's GitHub release asset digest",
+      "license": "Apache-2.0; LICENSE, THIRD-PARTY-NOTICES.txt and RUST-THIRD-PARTY-NOTICES.{txt,json} retained in runtime/passession and runtime/passession-app/runtime",
+      "purpose": "Native Rust Passession daemon and paseo CLI: the unmodified official daemon component ZIP, extracted to runtime/passession and, as the desktop client's bundled runtime, to runtime/passession-app/runtime"
     },
     "passessionApp": {
-      "version": "0.13.15",
+      "version": "0.13.35",
       "repository": "https://github.com/emotionbug/Passession",
-      "commit": "428a5f68f5683d9a63a90d506909568e60093e6b",
-      "url": "https://github.com/emotionbug/Passession/releases/download/v0.13.15/Paseo-Sessions-0.13.15-windows-x64.exe",
-      "sha256": "ba538c6bb61ebf1ca35181a5e029c6725ca902305513a0ccd63da997069d08c0",
-      "checksumSource": "https://github.com/emotionbug/Passession/releases/download/v0.13.15/provenance-windows-x64.json and GitHub release asset digest",
-      "license": "Apache-2.0; LICENSE, THIRD-PARTY-NOTICES.txt, font licenses and bundled-runtime notices retained in runtime/passession-app",
-      "purpose": "Native Paseo Sessions desktop client; NSIS payload unpacked by pinned 7-Zip at build time, installer never executed"
+      "commit": "43ff7d59a0390427958ac62a97d77cae4e5237aa",
+      "releaseTag": "v0.13.35",
+      "url": "https://github.com/emotionbug/Passession/releases/download/v0.13.35/Paseo-Component-app-0.13.35-windows-x64.zip",
+      "sha256": "0c93f4127ef3e68423417e7ccfd2d5c2b72ede90d02023bb751aac4a4bd7a7e8",
+      "size": 43806400,
+      "component": {
+        "id": "app",
+        "target": "windows-x64",
+        "inputHash": "3624eb061615fbb2ebcde4fd3caf977d47b8cff724d757a2f63f88c3b60dc96b",
+        "abiVersion": 1,
+        "requires": { "daemon": 1, "tailnet": 1, "update-helper": 2 }
+      },
+      "executable": "paseo_sessions.exe",
+      "executableSha256": "c45416da19f04e43c85eccffba4ed53b025861ee3d242cdb2b28e39141137eba",
+      "checksumSource": "https://github.com/emotionbug/Passession/releases/download/v0.13.35/components-windows-x64.json (sha256 cbfbce8ffd0d4d39d89fd57bb383616e8c3da53a6f02f27c040df4c1c7eff20f) and provenance-windows-x64.json (sha256 e1b269a1f0c46b27f15d3c0d72f3f5f4759e6f9cde4d13663139065b79c0f226; .github/workflows/desktop-release.yml run 44011973715), both matching their GitHub release asset digests, plus this ZIP's GitHub release asset digest",
+      "license": "Apache-2.0; LICENSE, THIRD-PARTY-NOTICES.txt and makepad font licenses/notices retained in runtime/passession-app",
+      "purpose": "Native Passession desktop client: the unmodified official app component ZIP extracted to runtime/passession-app with the daemon component at runtime/ (upstream package roots). The tailnet and update-helper components and components.json are not shipped, so the client runs without a component inventory: no in-app updates and no embedded Tailscale"
     },
     "omp": {
-      "version": "18.20.0",
+      "version": "18.22.0",
       "repository": "https://github.com/can1357/oh-my-pi",
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-windows-x64.exe",
-      "sha256": "1b6c7bda8241bc7d948495539f90ec47e6f30d1fec72b6ee097a67a1fc8d8e48",
-      "checksumSource": "https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.20.0",
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.22.0/omp-windows-x64.exe",
+      "sha256": "3987213b123ff424d66aa061f916314007bcb07226fafe15da70e3abd87569d7",
+      "checksumSource": "https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.22.0",
       "license": "MIT (LICENSES/OMP-LICENSE.txt); standalone executable with its embedded JavaScript runtime",
       "purpose": "Unmodified upstream standalone OMP agent executable; no separate Bun or npm install"
     },
     "ompLicense": {
-      "version": "18.20.0",
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/LICENSE",
+      "version": "18.22.0",
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.22.0/LICENSE",
       "sha256": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63",
-      "checksumSource": "https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.20.0"
+      "checksumSource": "https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.22.0"
     },
     "ompCatalog": {
-      "version": "18.20.0",
-      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.20.0/packages/catalog/src/models.json",
-      "sha256": "1518a4066bdd15d620c692a6372b0776623f52e05769f5e4e03b62c59d74e261",
+      "version": "18.22.0",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.22.0/packages/catalog/src/models.json",
+      "sha256": "f7bfe294649798a0c829194305c36828564db6b734ce8f6145a8815c495bd4b4",
       "buildToolOnly": true,
       "purpose": "Authoritative bundled provider identifiers for the generated Kiro-only OMP configuration"
     },
     "ompProviderRules": {
-      "version": "18.20.0",
-      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.20.0/packages/catalog/src/compat/rules.json",
-      "sha256": "35a5c3ac00f11ceed1d8088e792a1dec735980944294bad56ea1b2b48c70c4a0",
+      "version": "18.22.0",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.22.0/packages/catalog/src/compat/rules.json",
+      "sha256": "1616b4c3288d9ba2c807aeda1ecabc94d3cd8609fb8c4e1e2f123721e085cb26",
       "buildToolOnly": true,
       "purpose": "Complete built-in provider registry, including dynamic-only providers; consumed as JSON, never executed"
     },
     "plugin": {
-      "version": "0.4.8",
+      "version": "0.5.2",
       "repository": "https://github.com/emotionbug/omp-kiro",
-      "commit": "8056e05380e545afed6a093a1e6e550b4a59fd0d",
-      "url": "https://codeload.github.com/emotionbug/omp-kiro/tar.gz/8056e05380e545afed6a093a1e6e550b4a59fd0d",
-      "sha256": "fc7dbb06c6de1486b464e0a87c3f9a221a13ce56df5399fbab37a6d15cac23ac",
+      "commit": "e2dba938acd89c60e5d3f2e269c9047a5a038ddf",
+      "url": "https://codeload.github.com/emotionbug/omp-kiro/tar.gz/e2dba938acd89c60e5d3f2e269c9047a5a038ddf",
+      "sha256": "0410a7e7442d4dd1876268d1f0b53a03a5611d1f6958bb0adac16f1e382d6a3b",
       "license": "Apache-2.0"
     },
     "node": {
@@ -173,24 +194,6 @@
       "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/mingw-w64-git-2.56.1.1-1.src.tar.gz",
       "sha256": "2a0769d21e3e3cec9216ddca920fe7d7efe274e7d1c14882003a2ce7d674c7b4",
       "checksumSource": "https://api.github.com/repos/git-for-windows/git/releases/tags/v2.56.1.windows.1"
-    },
-    "sevenZipBootstrap": {
-      "version": "26.06",
-      "url": "https://github.com/ip7z/7zip/releases/download/26.06/7zr.exe",
-      "sha256": "e80db2dad715a6c5adabe292d31ed54e11f4e9b99ca349827b50573b175891bc",
-      "checksumSource": "https://api.github.com/repos/ip7z/7zip/releases/tags/26.06",
-      "license": "LGPL-2.1-or-later (7-Zip); build host only, not redistributed",
-      "buildToolOnly": true,
-      "purpose": "Unpacks the official 7-Zip archive below without running its installer"
-    },
-    "sevenZip": {
-      "version": "26.06",
-      "url": "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-x64.exe",
-      "sha256": "9b697f65ecc2d9b0152f5ee96d72dde522a7827690349d9307935dacf40f42ec",
-      "checksumSource": "https://api.github.com/repos/ip7z/7zip/releases/tags/26.06",
-      "license": "LGPL-2.1-or-later with unRAR restriction and BSD notices (7-Zip); build host only, not redistributed",
-      "buildToolOnly": true,
-      "purpose": "Full-format 7z.exe/7z.dll that reads the Passession NSIS installer payload without executing it"
     }
   }
 }

@@ -19,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const bundleRoot = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 export const pluginRoot = path.join(bundleRoot, "app/plugin/omp-kiro");
 export const pluginExtension = path.join(pluginRoot, "index.js");
-export const pluginPin = "8056e05380e545afed6a093a1e6e550b4a59fd0d";
+export const pluginPin = "e2dba938acd89c60e5d3f2e269c9047a5a038ddf";
 export const profileId = "kiro-http";
 export const daemonExecutable = path.join(bundleRoot, "runtime/passession/paseo.exe");
 export const appExecutable = path.join(bundleRoot, "runtime/passession-app/paseo_sessions.exe");
@@ -28,7 +28,7 @@ export const ompNetworkPolicy = path.join(bundleRoot, "app/omp-network-policy.js
 // Passession's OMP family maps these mode IDs to --approval-mode yolo|write|always-ask.
 export const ompModes = ["full", "write", "ask"];
 // Built-in Passession providers. This private home exposes only Kiro HTTP.
-const builtinProviders = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
+const builtinProviders = ["claude", "codex", "copilot", "opencode", "pi", "omp", "antigravity", "muse", "hoplite"];
 
 export async function json(file, fallback = null) {
   try {
@@ -322,7 +322,12 @@ export function runtimeEnv(state, env = process.env) {
   };
 }
 // Passession model selectors for the OMP family are `<OMP provider>/<model id>`.
-export function modelRows(catalog) {
+// As omp-kiro's own Passession setup does, a model whose request-fields schema
+// advertises effort levels (thinkingConfig is the plugin's kiroThinkingConfig)
+// offers Auto, Off unless reasoning is mandatory, then the advertised efforts.
+// A previous row's default thinking choice is kept only while still offered;
+// options disappear when the schema no longer advertises them.
+export function modelRows(catalog, thinkingConfig, previousRows) {
   if (!Array.isArray(catalog) || !catalog.length)
     throw new Error("No account model metadata. Run auth.cmd login, then models.cmd.");
   const ids = new Set();
@@ -336,11 +341,35 @@ export function modelRows(catalog) {
       throw new Error("Invalid or duplicate model ID in account catalog.");
     ids.add(model.id);
   }
-  return catalog.map((model) => ({
-    id: `${profileId}/${model.id}`,
-    label: typeof model.name === "string" && model.name.trim() ? model.name : model.id,
-    ...(model.id === "auto" ? { isDefault: true } : {}),
-  }));
+  const previousDefaults = new Map(
+    (Array.isArray(previousRows) ? previousRows : [])
+      .filter((row) => row && typeof row === "object" && typeof row.id === "string")
+      .map((row) => [row.id, row.defaultThinkingOptionId]),
+  );
+  return catalog.map((model) => {
+    const id = `${profileId}/${model.id}`;
+    const row = {
+      id,
+      label: typeof model.name === "string" && model.name.trim() ? model.name : model.id,
+      ...(model.id === "auto" ? { isDefault: true } : {}),
+    };
+    const thinking = thinkingConfig(model.additionalModelRequestFieldsSchema);
+    if (!thinking) return row;
+    const levels = ["auto", ...(thinking.requiresEffort ? [] : ["off"]), ...thinking.efforts];
+    const previousDefault = previousDefaults.get(id);
+    const defaultLevel = levels.includes(previousDefault)
+      ? previousDefault
+      : (thinking.defaultLevel ?? "auto");
+    return {
+      ...row,
+      thinkingOptions: levels.map((level) => ({
+        id: level,
+        label: level === "xhigh" ? "XHigh" : level[0].toUpperCase() + level.slice(1),
+        ...(level === defaultLevel ? { isDefault: true } : {}),
+      })),
+      defaultThinkingOptionId: defaultLevel,
+    };
+  });
 }
 const exists = (file) =>
   lstat(file).catch((error) => {
@@ -355,22 +384,23 @@ export async function configureDaemon(state, { passwordHash, port = state.config
   });
   const previous = original ? JSON.parse(original) : {};
   const catalogFile = path.join(state.root, "models.json");
+  const previousProvider = previous.agents?.providers?.[profileId];
   let models = [];
   if ((await exists(state.authFile)) && (await exists(catalogFile))) {
     const load = (file) => import(pathToFileURL(path.join(pluginRoot, "server", file)).href);
-    const [{ readKiroAuth }, { readKiroModelCatalog }] = await Promise.all([
+    const [{ readKiroAuth }, { readKiroModelCatalog }, { kiroThinkingConfig }] = await Promise.all([
       load("auth.mjs"),
       load("model-catalog.mjs"),
+      load("effort.mjs"),
     ]);
     try {
       const auth = await readKiroAuth({ authFile: state.authFile });
       const catalog = await readKiroModelCatalog(catalogFile, { auth });
-      if (catalog.length) models = modelRows(catalog);
+      if (catalog.length) models = modelRows(catalog, kiroThinkingConfig, previousProvider?.models);
     } catch {
       console.warn("Kiro HTTP provider disabled: authenticate and run models.cmd to refresh this account's catalog.");
     }
   }
-  const previousProvider = previous.agents?.providers?.[profileId];
   // Keep desired activation separate from catalog gating: an empty model list
   // would make Passession discover OMP models itself, so no catalog disables it.
   const gateFile = path.join(state.root, "passession-profile.json");

@@ -10,13 +10,15 @@ try {
     const { discoverHttpModels } = await load("server/http.mjs");
     const { loadKiroAuth } = await load("server/auth.mjs");
     const { kiroCatalogAccountId } = await load("server/model-catalog.mjs");
+    const { kiroThinkingConfig } = await load("server/effort.mjs");
     const signal = AbortSignal.timeout(60000);
     const auth = await loadKiroAuth({ authFile: state.authFile, signal });
     const models = await discoverHttpModels({ signal, authProvider: async () => auth });
     if (!models.length)
       throw new Error("Kiro returned an empty catalog; previous metadata was not replaced.");
     const { modelRows } = await import("./state.mjs");
-    modelRows(models);
+    // Validate IDs and reasoning schemas before replacing the previous catalog.
+    modelRows(models, kiroThinkingConfig);
     await save(path.join(state.root, "models.json"), {
       version: 1,
       fetchedAt: new Date().toISOString(),

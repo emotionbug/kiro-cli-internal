@@ -70,7 +70,26 @@ function execute(relative, args, timeout = 30000) {
   assert.equal(result.status, 0, `${relative} ${args.join(" ")} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
-async function passessionIdentity(relativeRoot, installationKind) {
+async function componentDescriptor(relativeRoot, pin) {
+  const { id, inputHash, abiVersion } = pin.component;
+  const descriptor = JSON.parse(
+    await readFile(path.join(root, relativeRoot, `component-build-${id}.json`), "utf8"),
+  );
+  assert.equal(descriptor.id, id, `${relativeRoot}: component id`);
+  assert.deepEqual(
+    descriptor.identity,
+    { version: pin.version, sourceSha: pin.commit, inputHash, abiVersion },
+    `${relativeRoot}: component identity`,
+  );
+  assert.equal(descriptor.executable, pin.executable, `${relativeRoot}: component executable`);
+  assert.equal(descriptor.executableSha256, pin.executableSha256, `${relativeRoot}: descriptor digest`);
+  const executable = `${relativeRoot}/${pin.executable}`;
+  const digest = await sha256(path.join(root, executable));
+  assert.equal(digest, pin.executableSha256, `${executable}: pinned digest`);
+  await peMachine(executable);
+  return { executable, sha256: digest, component: { id, inputHash, abiVersion } };
+}
+async function passessionIdentity(relativeRoot) {
   const pin = inputs.passessionDaemon;
   const directory = path.join(root, relativeRoot);
   const runtime = JSON.parse(await readFile(path.join(directory, "paseo-runtime.json"), "utf8"));
@@ -84,38 +103,34 @@ async function passessionIdentity(relativeRoot, installationKind) {
     assert.equal(marker.arch, "x64");
     assert.equal(marker.runtime, "rust");
     assert.equal(marker.release, true);
-    assert.equal(marker.installationKind, installationKind, `${relativeRoot}: installation kind`);
+    assert.equal(marker.installationKind, "standalone-archive", `${relativeRoot}: installation kind`);
   }
   assert.equal(provenance.repository, "emotionbug/Passession");
   assert.equal(provenance.sourceDirty, false);
-  const executable = `${relativeRoot}/paseo.exe`;
-  const digest = await sha256(path.join(root, executable));
-  assert.equal(digest, provenance.executableSha256, `${executable}: provenance digest`);
-  assert.equal(digest, pin.executableSha256, `${executable}: pinned digest`);
-  await peMachine(executable);
-  const version = execute(executable, ["--version"]);
+  const identity = await componentDescriptor(relativeRoot, pin);
+  assert.equal(identity.sha256, provenance.executableSha256, `${identity.executable}: provenance digest`);
+  const version = execute(identity.executable, ["--version"]);
   assert.equal(version, `paseo ${pin.version}`);
-  assert.match(execute(executable, ["--help"]), /\bdaemon\b/);
-  return { executable, sha256: digest, installationKind, version };
+  assert.match(execute(identity.executable, ["--help"]), /\bdaemon\b/);
+  return { ...identity, installationKind: "standalone-archive", version };
 }
 
 let evidence;
 try {
-  const daemon = await passessionIdentity("runtime/passession", "standalone-archive");
-  const bundledDaemon = await passessionIdentity(
-    "runtime/passession-app/runtime",
-    "desktop-bundled",
-  );
+  const daemon = await passessionIdentity("runtime/passession");
+  const bundledDaemon = await passessionIdentity("runtime/passession-app/runtime");
   const descriptor = JSON.parse(
     await readFile(path.join(root, "runtime/passession-app/runtime/desktop-runtime.json"), "utf8"),
   );
   assert.equal(descriptor.executable, "paseo.exe", "Desktop descriptor must name the bundled daemon");
-  const desktop = "runtime/passession-app/paseo_sessions.exe";
-  await peMachine(desktop);
+  const desktop = await componentDescriptor("runtime/passession-app", inputs.passessionApp);
+  // No component inventory: the client must run in its non-component mode, never self-update.
   for (const entry of await readdir(path.join(root, "runtime/passession-app")))
     assert.ok(
-      !/^(?:Uninstall\.exe|\$PLUGINSDIR|\.paseo-sessions-owned-files)$/i.test(entry),
-      `Installer-only member shipped: ${entry}`,
+      !/^(?:components\.json|tailnet|update-helper|paseo_tailscale\.dll|passession-update-helper\.exe)$/i.test(
+        entry,
+      ),
+      `Component-inventory member shipped: ${entry}`,
     );
 
   const omp = "runtime/omp/omp.exe";
@@ -162,10 +177,11 @@ try {
     passessionDaemon: daemon,
     passessionAppBundledDaemon: bundledDaemon,
     passessionApp: {
-      executable: desktop,
+      ...desktop,
       machine: "AMD64",
       launched: false,
       descriptor: "runtime/passession-app/runtime/desktop-runtime.json",
+      componentInventory: false,
     },
     omp: { executable: omp, version: ompVersion },
     appDependencies: dependencies,

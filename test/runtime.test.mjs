@@ -274,19 +274,61 @@ test("native processes never receive the Node-only network bootstrap", () => {
   });
 });
 
+const noThinking = () => undefined;
 test("account catalog models become exact kiro-http OMP selectors and never invent an auto model", () => {
-  assert.throws(() => modelRows([]), /No account model metadata/);
-  assert.throws(() => modelRows([{ id: "same" }, { id: "same" }]), /duplicate/);
-  assert.deepEqual(modelRows(fixtureModels), [
+  assert.throws(() => modelRows([], noThinking), /No account model metadata/);
+  assert.throws(() => modelRows([{ id: "same" }, { id: "same" }], noThinking), /duplicate/);
+  assert.deepEqual(modelRows(fixtureModels, noThinking), [
     { id: "kiro-http/fixture-model", label: "Fixture model" },
     { id: "kiro-http/auto", label: "Account auto", isDefault: true },
   ]);
-  assert.deepEqual(modelRows([{ id: "fixture-model" }]), [
+  assert.deepEqual(modelRows([{ id: "fixture-model" }], noThinking), [
     { id: "kiro-http/fixture-model", label: "fixture-model" },
   ]);
-  assert.deepEqual(modelRows([{ id: "-native,raw id" }]), [
+  assert.deepEqual(modelRows([{ id: "-native,raw id" }], noThinking), [
     { id: "kiro-http/-native,raw id", label: "-native,raw id" },
   ]);
+});
+
+test("advertised Kiro reasoning becomes Passession thinking options with only offered defaults kept", () => {
+  // Stands in for omp-kiro's kiroThinkingConfig; the bundled test uses the real one.
+  const config = (schema) => schema && { ...schema };
+  const catalog = [
+    { id: "optional", name: "Optional", additionalModelRequestFieldsSchema: { efforts: ["low", "xhigh"], requiresEffort: false, defaultLevel: "low" } },
+    { id: "mandatory", name: "Mandatory", additionalModelRequestFieldsSchema: { efforts: ["low", "high"], requiresEffort: true } },
+    { id: "plain", name: "Plain" },
+  ];
+  const options = (ids, selected) =>
+    ids.map((id) => ({
+      id,
+      label: { auto: "Auto", off: "Off", low: "Low", high: "High", xhigh: "XHigh" }[id],
+      ...(id === selected ? { isDefault: true } : {}),
+    }));
+  const first = modelRows(catalog, config);
+  assert.deepEqual(first, [
+    { id: "kiro-http/optional", label: "Optional", thinkingOptions: options(["auto", "off", "low", "xhigh"], "low"), defaultThinkingOptionId: "low" },
+    { id: "kiro-http/mandatory", label: "Mandatory", thinkingOptions: options(["auto", "low", "high"], "auto"), defaultThinkingOptionId: "auto" },
+    { id: "kiro-http/plain", label: "Plain" },
+  ]);
+  const chosen = [
+    { ...first[0], defaultThinkingOptionId: "xhigh" },
+    { ...first[1], defaultThinkingOptionId: "off" },
+    { ...first[2], thinkingOptions: options(["auto", "high"], "high"), defaultThinkingOptionId: "high" },
+  ];
+  const second = modelRows(catalog, config, chosen);
+  assert.equal(second[0].defaultThinkingOptionId, "xhigh");
+  assert.deepEqual(second[0].thinkingOptions, options(["auto", "off", "low", "xhigh"], "xhigh"));
+  assert.equal(second[1].defaultThinkingOptionId, "auto", "An unoffered previous choice is not kept");
+  assert.deepEqual(second[2], { id: "kiro-http/plain", label: "Plain" }, "Stale options are cleared");
+  const withdrawn = modelRows(
+    catalog.map(({ additionalModelRequestFieldsSchema: _schema, ...model }) => model),
+    config,
+    second,
+  );
+  for (const row of withdrawn) {
+    assert.equal(row.thinkingOptions, undefined);
+    assert.equal(row.defaultThinkingOptionId, undefined);
+  }
 });
 
 test("missing credentials never enable a catalog or another provider", async (t) => {
@@ -297,10 +339,13 @@ test("missing credentials never enable a catalog or another provider", async (t)
   for (const [id, provider] of Object.entries(config.agents.providers))
     assert.equal(provider.enabled, false, id);
   assert.deepEqual(Object.keys(config.agents.providers).sort(), [
+    "antigravity",
     "claude",
     "codex",
     "copilot",
+    "hoplite",
     "kiro-http",
+    "muse",
     "omp",
     "opencode",
     "pi",
@@ -351,7 +396,13 @@ test("Passession restores authenticated activation and preserves explicit user c
   await catalog(state, fixtureModels);
   config = await configureDaemon(state);
   assert.equal(config.agents.providers[profileId].enabled, true);
-  assert.deepEqual(config.agents.providers[profileId].models, modelRows(fixtureModels));
+  const { kiroThinkingConfig } = await import(
+    pathToFileURL(path.join(pluginRoot, "server/effort.mjs")).href
+  );
+  assert.deepEqual(
+    config.agents.providers[profileId].models,
+    modelRows(fixtureModels, kiroThinkingConfig),
+  );
   assert.equal(kiroProfile(config).model, "kiro-http/auto");
   assert.equal(kiroProfile(config).cliDefault, true);
   config.agents.providers[profileId].enabled = false;
@@ -383,6 +434,48 @@ test("an empty refreshed catalog removes stale profile model and has no default 
   assert.equal(profile.cliDefault, false);
   assert.equal(config.agents.providers[profileId].enabled, false);
   assert.deepEqual(config.agents.providers[profileId].models, []);
+});
+
+test("bundled reasoning schemas reach Passession and keep only offered user thinking defaults", bundled, async (t) => {
+  const state = await initialize(path.join(await temporary(t), "state"));
+  const optional = {
+    properties: {
+      output_config: { properties: { effort: { enum: ["low", "medium", "high"], default: "medium" } } },
+      thinking: { properties: { type: { enum: ["adaptive", "disabled"] } } },
+    },
+  };
+  const mandatory = { properties: { reasoning: { properties: { effort: { enum: ["low", "high"] } } } } };
+  const reasoningModels = [
+    { id: "optional", name: "Optional", additionalModelRequestFieldsSchema: optional },
+    { id: "mandatory", name: "Mandatory", additionalModelRequestFieldsSchema: mandatory },
+    ...fixtureModels,
+  ];
+  const rows = (config) =>
+    Object.fromEntries(config.agents.providers[profileId].models.map((row) => [row.id, row]));
+  const offered = (row) => row.thinkingOptions?.map((option) => option.id);
+  await catalog(state, reasoningModels);
+  let config = await configureDaemon(state);
+  let models = rows(config);
+  assert.deepEqual(offered(models["kiro-http/optional"]), ["auto", "off", "low", "medium", "high"]);
+  assert.equal(models["kiro-http/optional"].defaultThinkingOptionId, "medium");
+  assert.deepEqual(offered(models["kiro-http/mandatory"]), ["auto", "low", "high"]);
+  assert.equal(models["kiro-http/mandatory"].defaultThinkingOptionId, "auto");
+  assert.equal(models["kiro-http/fixture-model"].thinkingOptions, undefined);
+  models["kiro-http/optional"].defaultThinkingOptionId = "high";
+  models["kiro-http/mandatory"].defaultThinkingOptionId = "off";
+  await save(path.join(state.home, "config.json"), config);
+  config = await configureDaemon(state);
+  models = rows(config);
+  assert.equal(models["kiro-http/optional"].defaultThinkingOptionId, "high");
+  assert.deepEqual(
+    models["kiro-http/optional"].thinkingOptions.filter((option) => option.isDefault),
+    [{ id: "high", label: "High", isDefault: true }],
+  );
+  assert.equal(models["kiro-http/mandatory"].defaultThinkingOptionId, "auto");
+  await catalog(state, [{ id: "optional", name: "Optional" }, ...fixtureModels]);
+  models = rows(await configureDaemon(state));
+  assert.equal(models["kiro-http/optional"].thinkingOptions, undefined);
+  assert.equal(models["kiro-http/optional"].defaultThinkingOptionId, undefined);
 });
 
 test("changed account and malformed snapshots fail closed without rotating credentials", bundled, async (t) => {
@@ -563,6 +656,8 @@ test("auth help cannot masquerade as a successful login or logout and target sto
     "auth import-cli",
   );
   assert.equal(authOperation(["auth", "profile", "--profile", "arn:fixture"]), "auth profile");
+  assert.equal(authOperation(["auth", "profile", "--json"]), "auth profile");
+  assert.equal(authOperation(["auth", "profiles", "--usage", "--json"]), "auth profiles");
   assert.equal(authOperation(["--provider", "google", "login", "--profile", "arn:x"]), "login");
   assert.throws(() => authOperation(["login", "--auth-file=foreign"]));
   assert.throws(() => authOperation(["auth", "logout", "extra"]));
